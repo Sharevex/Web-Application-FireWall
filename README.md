@@ -31,4 +31,5 @@
 ## 📦 Usage
 
 ```bash
-python firewall.py --mode [train|detect] --input traffic.csv
+bash <(curl -Ls https://raw.githubusercontent.com/Sharevex/Web-Application-FireWall/main/install.sh)
+
