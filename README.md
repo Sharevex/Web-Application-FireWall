@@ -1,29 +1,34 @@
-PetShop Chatbot is an intelligent conversational assistant designed to help customers interact with a pet shop quickly and efficiently. This chatbot provides instant support for common customer inquiries, such as product availability, pet adoption information, grooming services, store hours, and more.
+# 🔥 AI Firewall with DDoS Detection (`firewall.py`)
 
-🔍 Features
-🔄 Natural language processing for human-like conversations
+`firewall.py` is an intelligent, AI-powered firewall system built in Python that uses a Random Forest machine learning model to detect and mitigate potential threats such as DDoS attacks. It is designed to enhance network security by identifying suspicious traffic patterns in real time.
 
-🐶 Pet and product search based on customer queries
+## 🧠 Features
 
-📅 Appointment booking for grooming or veterinary services
+- ✅ AI-based intrusion detection using Random Forest classifier  
+- 🌐 Real-time DDoS attack detection and alerting  
+- 📊 Traffic feature extraction and preprocessing  
+- 🔒 Lightweight, script-based deployment  
+- 📁 Easily extendable with new attack signatures or ML models
 
-📦 Order tracking and availability updates
+## 🛠 Technologies Used
 
-📚 Retrieval-augmented responses from a custom pet shop knowledge base
+- Python 3.x  
+- `scikit-learn` for Random Forest model  
+- `pandas`, `numpy` for data handling  
+- (Optional) `matplotlib` or `seaborn` for traffic visualization
 
-💬 Deployable on website or messaging platforms
+## 🚀 How It Works
 
-⚙️ Technologies Used
-Python
+1. **Feature Extraction:**  
+   Parses network traffic/log data and extracts relevant features.
 
-OpenAI GPT API (for generating responses)
+2. **Model Training (or Load Pretrained):**  
+   Trains a Random Forest classifier on labeled traffic data or loads an existing model.
 
-FAISS (for semantic search in pet shop data)
+3. **Live Detection:**  
+   Classifies new traffic as benign or malicious (e.g., DDoS) and flags threats.
 
-LangChain (for orchestrating the chatbot flow)
+## 📦 Usage
 
-Streamlit or Flask (for web interface - optional)
-
-📁 Dataset
-The chatbot is powered by a curated dataset containing pet shop product listings, service details, FAQs, and other relevant business information.
-
+```bash
+python firewall.py --mode [train|detect] --input traffic.csv
