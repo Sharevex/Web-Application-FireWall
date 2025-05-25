@@ -1,1 +1,58 @@
-
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <!-- Auto-refresh the page every 5 seconds -->
+    <meta http-equiv="refresh" content="5">
+    <title>Firewall Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f8f8f8; }
+        h1 { color: #333; }
+        table { border-collapse: collapse; width: 70%; margin-top: 10px; background-color: #fff; }
+        th, td { border: 1px solid #ccc; padding: 10px; text-align: left; }
+        th { background-color: #e0e0e0; }
+    </style>
+</head>
+<body>
+    <h1>Firewall Dashboard</h1>
+    <table>
+        <tr>
+            <th>Metric</th>
+            <th>Value</th>
+        </tr>
+        <tr>
+            <td>Total Requests</td>
+            <td id="total_requests">Loading...</td>
+        </tr>
+        <tr>
+            <td>Allowed Requests</td>
+            <td id="allowed_requests">Loading...</td>
+        </tr>
+        <tr>
+            <td>Blocked Requests</td>
+            <td id="blocked_requests">Loading...</td>
+        </tr>
+        <tr>
+            <td>DDoS Blocks</td>
+            <td id="ddos_blocks">Loading...</td>
+        </tr>
+        <tr>
+            <td>AI-based Blocks</td>
+            <td id="ai_based_blocks">Loading...</td>
+        </tr>
+    </table>
+    <script>
+        // Fetch the latest stats from the server and update the dashboard
+        fetch('/stats')
+        .then(response => response.json())
+        .then(data => {
+            document.getElementById('total_requests').textContent = data.total_requests;
+            document.getElementById('allowed_requests').textContent = data.allowed_requests;
+            document.getElementById('blocked_requests').textContent = data.blocked_requests;
+            document.getElementById('ddos_blocks').textContent = data.ddos_blocks;
+            document.getElementById('ai_based_blocks').textContent = data.ai_based_blocks;
+        })
+        .catch(error => console.error('Error fetching stats:', error));
+    </script>
+</body>
+</html>
