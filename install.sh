@@ -12,16 +12,18 @@ fi
 
 cd Web-Application-FireWall
 
-# Install dependencies if requirements.txt exists
+# Install pip3 if not present, then install requirements
 if [ -f requirements.txt ]; then
-  apt install python3-pip
+  if ! command -v pip3 &> /dev/null; then
+    apt update && apt install -y python3-pip
+  fi
   pip3 install -r requirements.txt
 fi
 
-# Kill previous instance (adjust to your launch script/process if needed)
+# Kill previous instance (adjust as needed)
 pkill -f start.sh || true
 
-# Start application and save output to output.txt (edit ./start.sh if needed)
+# Start application and save output to output.txt
 nohup ./start.sh > output.txt 2>&1 &
 
 # Add cron job to keep running (saves output as well)
