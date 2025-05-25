@@ -14,6 +14,7 @@ cd Web-Application-FireWall
 
 # Install dependencies if requirements.txt exists
 if [ -f requirements.txt ]; then
+  apt install python3-pip
   pip3 install -r requirements.txt
 fi
 
