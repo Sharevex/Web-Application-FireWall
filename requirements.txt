@@ -3,3 +3,4 @@ numpy
 scapy
 joblib
 pandas
+scikit-learn
