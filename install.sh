@@ -12,14 +12,18 @@ fi
 
 cd Web-Application-FireWall
 
-# (Optional) Install dependencies if needed
-# e.g., pip install -r requirements.txt
+# Install dependencies if requirements.txt exists
+if [ -f requirements.txt ]; then
+  pip3 install -r requirements.txt
+fi
 
-# (Optional) Stop existing instance
+# Kill previous instance (adjust to your launch script/process if needed)
 pkill -f start.sh || true
 
-# (Optional) Start application (edit below as needed!)
-nohup ./start.sh > /dev/null 2>&1 &
+# Start application and save output to output.txt (edit ./start.sh if needed)
+nohup ./start.sh > output.txt 2>&1 &
 
-# Setup cron to keep it running. Adjust the file/command if needed.
-(crontab -l 2>/dev/null; echo "*/5 * * * * cd /opt/Web-Application-FireWall && pgrep -f start.sh > /dev/null || nohup ./start.sh > /dev/null 2>&1 &") | sort -u | crontab -
+# Add cron job to keep running (saves output as well)
+(crontab -l 2>/dev/null; \
+ echo "*/5 * * * * cd /opt/Web-Application-FireWall && pgrep -f start.sh > /dev/null || nohup ./start.sh > /opt/Web-Application-FireWall/output.txt 2>&1 &" \
+) | sort -u | crontab -
