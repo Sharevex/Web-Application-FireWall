@@ -196,6 +196,21 @@ def get_cpu_usage():
         "cores": core_count
     }
 
+def get_uptime():
+    boot_time = psutil.boot_time()
+    current_time = time.time()
+    uptime_seconds = current_time - boot_time
+
+    uptime_days = int(uptime_seconds // (24 * 3600))
+    uptime_hours = int((uptime_seconds % (24 * 3600)) // 3600)
+    uptime_minutes = int((uptime_seconds % 3600) // 60)
+    uptime_seconds = int(uptime_seconds % 60)
+
+    return {
+        "uptime_seconds": int(current_time - boot_time),
+        "formatted": f"{uptime_days}d {uptime_hours}h {uptime_minutes}m {uptime_seconds}s"
+    }
+
 
 # Get RAM usage
 def get_ram_usage():
@@ -228,6 +243,7 @@ def metrics():
         "cpu": get_cpu_usage(),
         "ram": get_ram_usage(),
         "disk": get_disk_usage(),
+        "uptime":get_uptime(),
         "timestamp": time.time()
     }
     return jsonify(data)
