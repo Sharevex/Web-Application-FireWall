@@ -1,58 +1,402 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+
 <head>
-    <meta charset="utf-8">
-    <!-- Auto-refresh the page every 5 seconds -->
-    <meta http-equiv="refresh" content="5">
-    <title>Firewall Dashboard</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f8f8f8; }
-        h1 { color: #333; }
-        table { border-collapse: collapse; width: 70%; margin-top: 10px; background-color: #fff; }
-        th, td { border: 1px solid #ccc; padding: 10px; text-align: left; }
-        th { background-color: #e0e0e0; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Firewall Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    :root {
+      --dark-bg: #181d26;
+      --card-bg: rgba(24, 29, 38, 0.95);
+      --border-dark: #233043;
+      --text-primary: #d6e3f3;
+      --text-secondary: #a7c7e7;
+      --text-muted: #b9c9d5;
+      --accent-blue: #54aaff;
+      --gauge-cpu: #37c9ff;
+      --gauge-ram: #c661e9;
+      --gauge-disk: #ffcc00;
+      --gauge-bg: #2f3b54;
+    }
+
+    body {
+      background: radial-gradient(ellipse at top left, #232b3b 30%, #181d26 90%);
+      font-family: 'Segoe UI', Arial, sans-serif;
+      color: var(--text-primary);
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+    }
+
+    .gauge-fg {
+      stroke-linecap: round;
+      transition: stroke-dashoffset 0.8s cubic-bezier(.73, 1.8, .25, 1);
+    }
+
+    .text-shadow-blue {
+      text-shadow: 0 2px 18px rgba(35, 129, 255, 0.39), 0 0 1px #233, 0 0 2px #233;
+    }
+
+    .text-shadow-emoji {
+      filter: drop-shadow(0 0 8px rgba(255, 153, 0, 0.87));
+    }
+
+    .text-shadow-gauge {
+      text-shadow: 0 0 4px rgba(0, 216, 255, 0.2), 0 1.5px 4px rgba(16, 16, 51, 1);
+    }
+
+    .text-shadow-mono {
+      filter: drop-shadow(0 2px 8px rgba(0, 204, 255, 0.47));
+    }
+
+    .text-shadow-stat {
+      text-shadow: 0 0 14px rgba(2, 156, 252, 0.23);
+    }
+
+    .text-shadow-green {
+      text-shadow: 0 0 10px rgba(113, 255, 191, 0.38);
+    }
+
+    .text-shadow-red {
+      text-shadow: 0 0 10px rgba(251, 96, 126, 0.4);
+    }
+
+    .text-shadow-yellow {
+      text-shadow: 0 0 8px rgba(255, 230, 8, 0.32);
+    }
+
+    .text-shadow-violet {
+      text-shadow: 0 0 8px rgba(230, 97, 233, 0.51);
+    }
+
+    .main-title {
+      color: var(--accent-blue);
+      font-weight: 900;
+      letter-spacing: 0.05em;
+    }
+
+    .emoji-icon {
+      filter: drop-shadow(0 0 8px rgba(255, 153, 0, 0.87));
+    }
+
+    .card-custom {
+      background: var(--card-bg);
+      border: 1.5px solid var(--border-dark);
+      box-shadow: 0 4px 32px rgba(30, 41, 59, 0.27);
+      border-radius: 1rem;
+    }
+
+    .card-hover:hover {
+      transform: translateY(-4px) scale(1.012);
+      box-shadow: 0 8px 42px rgba(8, 95, 158, 0.23), 0 3px 24px rgba(0, 0, 0, 0.5);
+      transition: all 0.25s cubic-bezier(0.5, 2.5, 0.4, 0.85);
+    }
+
+    .gauge-container {
+      width: 115px;
+      height: 115px;
+      position: relative;
+      margin: 0 auto 1rem auto;
+    }
+
+    .gauge-text {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 1rem;
+      font-weight: 900;
+      color: #49bfff;
+      user-select: none;
+    }
+
+    .card-title-custom {
+      color: #92abef;
+      font-size: 1.125rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      margin-bottom: 0.5rem;
+    }
+
+    .stat-value {
+      font-size: 2rem;
+      font-weight: 900;
+      letter-spacing: 0.06em;
+      margin: 0;
+      word-break: break-all;
+    }
+
+    .stat-blue { color: #2196f3; }
+    .stat-green { color: #00b360; }
+    .stat-red { color: #ff3c3c; }
+    .stat-violet { color: #c661e9; }
+
+    .mono-text {
+      font-family: 'Segoe UI Mono', monospace;
+      color: #8ed1fc;
+      min-width: 2.25rem;
+      display: inline-block;
+    }
+
+    .list-custom {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      width: 100%;
+    }
+
+    .list-custom li {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      margin: 0.25rem 0;
+      display: flex;
+      justify-content: space-between;
+      font-family: 'Segoe UI Mono', monospace;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .list-custom li .percent {
+      color: #8ed1fc;
+      min-width: 2.75rem;
+      text-align: right;
+    }
+
+    .list-custom li .ip,
+    .list-custom li .reason {
+      flex: 1;
+      padding-left: 0.5rem;
+      word-break: break-all;
+    }
+
+    .footer-custom {
+      text-align: center;
+      font-size: 0.96rem;
+      margin-top: 3rem;
+      color: #7e8ea8;
+      opacity: 0.65;
+      letter-spacing: 0.01em;
+    }
+
+    .container-custom {
+      max-width: 1100px;
+      margin: 0 auto;
+      margin-top: 2.25rem;
+      padding: 0 1.25rem;
+    }
+
+    .text-secondary-custom {
+      color: var(--text-secondary);
+      font-size: 1rem;
+      font-weight: 500;
+    }
+
+    .text-muted-custom {
+      color: var(--text-muted);
+      font-size: 0.99rem;
+      margin-top: 0.5rem;
+      opacity: 0.93;
+    }
+  </style>
 </head>
+
 <body>
-    <h1>Firewall Dashboard</h1>
-    <table>
-        <tr>
-            <th>Metric</th>
-            <th>Value</th>
-        </tr>
-        <tr>
-            <td>Total Requests</td>
-            <td id="total_requests">Loading...</td>
-        </tr>
-        <tr>
-            <td>Allowed Requests</td>
-            <td id="allowed_requests">Loading...</td>
-        </tr>
-        <tr>
-            <td>Blocked Requests</td>
-            <td id="blocked_requests">Loading...</td>
-        </tr>
-        <tr>
-            <td>DDoS Blocks</td>
-            <td id="ddos_blocks">Loading...</td>
-        </tr>
-        <tr>
-            <td>AI-based Blocks</td>
-            <td id="ai_based_blocks">Loading...</td>
-        </tr>
-    </table>
-    <script>
-        // Fetch the latest stats from the server and update the dashboard
-        fetch('/stats')
-        .then(response => response.json())
+  <div class="container-custom">
+    <h1 class="display-4 text-center mb-5 main-title text-shadow-blue d-flex align-items-center justify-content-center">
+      <span class="emoji-icon me-3" style="font-size: 3rem;">🔥</span>
+      Firewall Dashboard
+    </h1>
+
+    <!-- System Monitoring Grid -->
+    <div class="row g-4 mb-5" id="monitoring">
+      <!-- CPU Card -->
+      <div class="col-12 col-sm-6 col-lg-4">
+        <div class="card card-custom p-4 text-center">
+          <div class="gauge-container">
+            <svg width="115" height="115">
+              <circle class="stroke-gauge-bg" stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5" r="46" />
+              <circle class="gauge-fg" stroke="var(--gauge-cpu)" stroke-width="13" fill="none" id="cpu_circle" cx="57.5" cy="57.5" r="46"
+                stroke-dasharray="289" stroke-dashoffset="289" />
+            </svg>
+            <div class="gauge-text text-shadow-gauge" id="cpu_percent">0%</div>
+          </div>
+          <div class="text-secondary-custom text-center">CPU Usage</div>
+          <div class="text-muted-custom text-center">
+            Cores: <span id="cpu_cores" class="mono-text text-shadow-mono">-</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- RAM Card -->
+      <div class="col-12 col-sm-6 col-lg-4">
+        <div class="card card-custom p-4 text-center">
+          <div class="gauge-container">
+            <svg width="115" height="115">
+              <circle class="stroke-gauge-bg" stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5" r="46" />
+              <circle class="gauge-fg" stroke="var(--gauge-ram)" stroke-width="13" fill="none" id="ram_circle" cx="57.5" cy="57.5" r="46"
+                stroke-dasharray="289" stroke-dashoffset="289" />
+            </svg>
+            <div class="gauge-text text-shadow-gauge" id="ram_percent">0%</div>
+          </div>
+          <div class="text-secondary-custom text-center">RAM Usage</div>
+          <div class="text-muted-custom text-center">
+            <span id="ram_used" class="mono-text text-shadow-mono">--</span> / <span
+              id="ram_total" class="mono-text text-shadow-mono">--</span> GB
+          </div>
+        </div>
+      </div>
+
+      <!-- Disk Card -->
+      <div class="col-12 col-sm-6 col-lg-4">
+        <div class="card card-custom p-4 text-center">
+          <div class="gauge-container">
+            <svg width="115" height="115">
+              <circle class="stroke-gauge-bg" stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5" r="46" />
+              <circle class="gauge-fg" stroke="var(--gauge-disk)" stroke-width="13" fill="none" id="disk_circle" cx="57.5" cy="57.5" r="46"
+                stroke-dasharray="289" stroke-dashoffset="289" />
+            </svg>
+            <div class="gauge-text text-shadow-gauge" id="disk_percent">0%</div>
+          </div>
+          <div class="text-secondary-custom text-center">Disk Usage</div>
+          <div class="text-muted-custom text-center">
+            <span id="disk_used" class="mono-text text-shadow-mono">-</span> / <span
+              id="disk_total" class="mono-text text-shadow-mono">-</span> GB
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Firewall Stats -->
+    <div class="row g-4 mb-5">
+      <!-- Top Blocked IPs - Left -->
+      <div class="col-12 col-md-6">
+        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-start" style="min-height: 100px;">
+          <span class="card-title-custom">Top Blocked IPs</span>
+          <ul id="top_blocked_ips" class="list-custom w-100">
+            {% for ip in top_ips %}
+            <li>{{ ip }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+
+      <!-- Block Reasons - Right -->
+      <div class="col-12 col-md-6">
+        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-start" style="min-height: 100px;">
+          <span class="card-title-custom">Block Reasons</span>
+          <ul id="block_reasons" class="list-custom w-100">
+            {% for reason in top_reasons %}
+            <li>{{ reason }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+
+      <!-- Stat Cards - Centered Text -->
+      <div class="col-12 col-md-6 col-xl-4">
+        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center" style="min-height: 100px;">
+          <span class="card-title-custom">Total Requests</span>
+          <span class="stat-value stat-blue text-shadow-stat" id="total_requests">9</span>
+        </div>
+      </div>
+
+      <div class="col-12 col-md-6 col-xl-4">
+        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center" style="min-height: 100px;">
+          <span class="card-title-custom">Allowed Requests</span>
+          <span class="stat-value stat-green text-shadow-green" id="allowed_requests">9</span>
+        </div>
+      </div>
+
+      <div class="col-12 col-md-6 col-xl-4">
+        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center" style="min-height: 100px;">
+          <span class="card-title-custom">Blocked Requests</span>
+          <span class="stat-value stat-red text-shadow-red" id="blocked_requests">0</span>
+        </div>
+      </div>
+
+      <div class="col-12 col-md-6 col-xl-4">
+        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center" style="min-height: 100px;">
+          <span class="card-title-custom">DDoS Blocks</span>
+          <span class="stat-value stat-red text-shadow-red" id="ddos_blocks">0</span>
+        </div>
+      </div>
+
+      <div class="col-12 col-md-6 col-xl-4">
+        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center" style="min-height: 100px;">
+          <span class="card-title-custom">AI-based Blocks</span>
+          <span class="stat-value stat-violet text-shadow-violet" id="ai_based_blocks">0</span>
+        </div>
+      </div>
+
+      <div class="col-12 col-md-6 col-xl-4">
+        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center" style="min-height: 100px;">
+          <span class="card-title-custom">Uptime</span>
+          <span class="stat-value stat-violet text-shadow-violet" id="uptime">0</span>
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer-custom">
+      © 2025 Sharevex Firewall System. Auto-refresh every 5 seconds.
+    </footer>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    // --- SYSTEM MONITORING ---
+    // For SVG gauge, 2𝜋r = ~289 (r=46)
+    function setGauge(circle, percent) {
+      const total = circle.getAttribute('stroke-dasharray') ? parseFloat(circle.getAttribute('stroke-dasharray')) : 289;
+      let val = Math.max(0, Math.min(100, percent || 0));
+      circle.style.strokeDashoffset = (total - ((val / 100) * total)).toFixed(2);
+    }
+
+    function updateSystem() {
+      fetch('/metrics').then(r => r.json()).then(data => {
+        // CPU
+        document.getElementById('cpu_percent').textContent = data.cpu.total.toFixed(1) + '%';
+        setGauge(document.getElementById('cpu_circle'), data.cpu.total);
+        document.getElementById('cpu_cores').textContent = data.cpu.cores;
+        // RAM
+        document.getElementById('ram_percent').textContent = data.ram.percent.toFixed(1) + '%';
+        setGauge(document.getElementById('ram_circle'), data.ram.percent);
+        document.getElementById('ram_total').textContent = data.ram.total;
+        document.getElementById('ram_used').textContent = data.ram.used;
+        // Disk (show only first/root partition)
+        if (data.disk && data.disk.length) {
+          const disk = data.disk[0];
+          document.getElementById('disk_percent').textContent = disk.percent.toFixed(1) + '%';
+          setGauge(document.getElementById('disk_circle'), disk.percent);
+          document.getElementById('disk_total').textContent = disk.total;
+          document.getElementById('disk_used').textContent = disk.used;
+        }
+      });
+    }
+    // --- FIREWALL ---
+    function updateFirewall() {
+      fetch('/stats')
+        .then(r => r.json())
         .then(data => {
-            document.getElementById('total_requests').textContent = data.total_requests;
-            document.getElementById('allowed_requests').textContent = data.allowed_requests;
-            document.getElementById('blocked_requests').textContent = data.blocked_requests;
-            document.getElementById('ddos_blocks').textContent = data.ddos_blocks;
-            document.getElementById('ai_based_blocks').textContent = data.ai_based_blocks;
+          // existing metrics
+          document.getElementById('total_requests').textContent = data.total_requests ?? 'N/A';
+          document.getElementById('allowed_requests').textContent = data.allowed_requests ?? 'N/A';
+          document.getElementById('blocked_requests').textContent = data.blocked_requests ?? 'N/A';
+          document.getElementById('ddos_blocks').textContent = data.ddos_blocks ?? 'N/A';
+          document.getElementById('ai_based_blocks').textContent = data.ai_based_blocks ?? 'N/A';
+
+          // Top Blocked IPs
         })
-        .catch(error => console.error('Error fetching stats:', error));
-    </script>
+        .catch(err => console.error('Failed to fetch /stats:', err));
+    }
+    // --- INIT ---
+    updateSystem();
+    updateFirewall();
+    setInterval(updateSystem, 1000);
+    setInterval(updateFirewall, 5000);
+  </script>
 </body>
+
 </html>
