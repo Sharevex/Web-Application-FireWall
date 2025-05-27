@@ -2,9 +2,6 @@
 set -e
 export DEBIAN_FRONTEND=noninteractive
 
-# Ignore Ctrl+C (SIGINT) to allow script continuation
-trap '' SIGINT
-
 sudo apt update && sudo apt upgrade -y
 sudo apt install -y python3 python3-venv python3-full git build-essential curl
 
@@ -47,16 +44,16 @@ fi
 
 pip install -r requirements.txt || pip install --break-system-packages -r requirements.txt
 
+# Run ai_detector.py in the background
 echo "------------------------------------------"
-echo "Running ai_detector.py and showing the output:"
+echo "Running ai_detector.py in background:"
 echo "------------------------------------------"
-./venv/bin/python3 ai_detector.py
+nohup ./venv/bin/python3 ai_detector.py > ai_detector.log 2>&1 &
 
+# Run firewall.py in the background
 echo "------------------------------------------"
-echo "Running firewall.py and showing the output:"
+echo "Running firewall.py in background:"
 echo "------------------------------------------"
-./venv/bin/python3 firewall.py
+nohup ./venv/bin/python3 firewall.py > firewall.log 2>&1 &
 
-# If you want to run the external script AFTER, uncomment the next line:
-# bash -c "$(curl -fsSL https://raw.githubusercontent.com/Azumi67/6TO4-GRE-IPIP-SIT/main/ubuntu24.sh)"
-
+echo "Background processes started. Check ai_detector.log and firewall.log for output."
