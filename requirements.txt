@@ -4,3 +4,4 @@ scapy
 joblib
 pandas
 scikit-learn
+openpyxl
