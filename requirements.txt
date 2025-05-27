@@ -5,3 +5,4 @@ joblib
 pandas
 scikit-learn
 openpyxl
+psutil
