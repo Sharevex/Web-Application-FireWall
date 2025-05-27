@@ -125,7 +125,7 @@ def train_detector():
          "SELECT name, password FROM accounts WHERE username='admin' --",
          "SELECT * FROM orders WHERE id=1; DROP TABLE orders;"
     ]
-    sqli_examples = load_examples_from_excel("sql_injection.xlsx", default_sqli)
+    sqli_examples = load_examples_from_excel("payloads/sqli.xlsx", default_sqli)
     for text in sqli_examples:
         texts.append(text)
         labels.append(1)
@@ -139,7 +139,7 @@ def train_detector():
          "<iframe src='javascript:alert(\"XSS\")'></iframe>",
          "<div onclick=alert('XSS')>Click me!</div>"
     ]
-    xss_examples = load_examples_from_excel("xss.xlsx", default_xss)
+    xss_examples = load_examples_from_excel("payloads/xss.xlsx", default_xss)
     for text in xss_examples:
         texts.append(text)
         labels.append(2)
@@ -152,7 +152,7 @@ def train_detector():
          "GET /home " * 55,
          "GET /login " * 45
     ]
-    ddos_examples = load_examples_from_excel("ddos.xlsx", default_ddos)
+    ddos_examples = load_examples_from_excel("payloads/ddos.xlsx", default_ddos)
     for text in ddos_examples:
         texts.append(text)
         labels.append(3)
