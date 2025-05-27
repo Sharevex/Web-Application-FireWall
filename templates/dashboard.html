@@ -391,7 +391,23 @@
         })
         .catch(err => console.error('Failed to fetch /stats:', err));
     }
+
+    function updateMetrics() {
+  fetch('/metrics')
+    .then(response => response.json())
+    .then(data => {
+      if (data.uptime && data.uptime.formatted) {
+        document.getElementById('uptime').innerText = data.uptime.formatted;
+      }
+      // Optionally update other stats here (cpu, ram, etc.)
+    })
+    .catch(error => {
+      console.error('Error fetching metrics:', error);
+    });
+}
+
     // --- INIT ---
+    updateMetrics();
     updateSystem();
     updateFirewall();
     setInterval(updateSystem, 1000);
