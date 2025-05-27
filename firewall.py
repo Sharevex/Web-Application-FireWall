@@ -17,6 +17,9 @@ from flask import Flask, request, jsonify, render_template
 import logging
 import numpy as np
 from scapy.all import sniff, IP, TCP, Raw
+import psutil
+import random
+
 
 # Import the AI detector (must be present in PYTHONPATH)
 from ai_detector import detect_attack
@@ -184,6 +187,51 @@ def start_packet_sniffing():
 ##############################################################################
 app = Flask(__name__)
 
+
+def get_cpu_usage():
+    total_cpu = psutil.cpu_percent(interval=1)
+    core_count = psutil.cpu_count(logical=True)
+    return {
+        "total": total_cpu,
+        "cores": core_count
+    }
+
+
+# Get RAM usage
+def get_ram_usage():
+    memory = psutil.virtual_memory()
+    return {
+        "total": round(memory.total / (1024**3), 2),  # GB
+        "used": round(memory.used / (1024**3), 2),
+        "free": round(memory.free / (1024**3), 2),
+        "percent": memory.percent
+    }
+
+# Get disk usage
+def get_disk_usage():
+    try:
+        usage = psutil.disk_usage('/')
+        disk_data = [{
+            "device": "root",
+            "mountpoint": "/",
+            "total": round(usage.total / (1024**3), 2),  # GB
+            "used": round(usage.used / (1024**3), 2),
+            "free": round(usage.free / (1024**3), 2),
+            "percent": usage.percent
+        }]
+        return disk_data
+    except PermissionError:
+        return []  # Return empty list if permission denied
+@app.route('/metrics')
+def metrics():
+    data = {
+        "cpu": get_cpu_usage(),
+        "ram": get_ram_usage(),
+        "disk": get_disk_usage(),
+        "timestamp": time.time()
+    }
+    return jsonify(data)
+
 @app.route("/stats")
 def stats_endpoint():
     return jsonify(stats.to_dict())
@@ -195,9 +243,11 @@ def top_ips():
 
 @app.route("/dashboard")
 def dashboard():
+    top_ips, top_reasons = get_top_blocked_ips_and_reasons()
+
     # Requires a dashboard.html in templates/. Fallback simple page if missing.
     try:
-        return render_template("dashboard.html")
+        return render_template("dashboard.html",top_ips=top_ips, top_reasons=top_reasons)
     except Exception:
         return jsonify({
             "message": "Dashboard template not found – create templates/dashboard.html to enable the UI.",
@@ -216,7 +266,7 @@ def firewall_route(path):
     if ddos_limiter.is_ddos(client_ip):
         stats.blocked_requests += 1
         stats.ddos_blocks += 1
-        add_blocked_ip(client_ip)
+        add_blocked_ip(client_ip,reason)
         log_request_details(client_ip, "<rate-limited>", "blocked – DDoS")
         return jsonify({"status": "blocked", "reason": "DDoS detected (rate limit)"}), 429
 
@@ -241,14 +291,14 @@ def firewall_route(path):
         stats.blocked_requests += 1
         stats.ai_based_blocks += 1
         reason = {1: "SQLi (AI)", 2: "XSS (AI)", 3: "DDoS (AI)"}.get(ai_label, "Anomaly (AI)")
-        add_blocked_ip(client_ip)
+        add_blocked_ip(client_ip,reason)
         log_request_details(client_ip, data, f"blocked – {reason}")
         return jsonify({"status": "blocked", "reason": reason}), 403
 
     if rule_flag:
         stats.blocked_requests += 1
         stats.rule_based_blocks += 1
-        add_blocked_ip(client_ip)
+        add_blocked_ip(client_ip,reason)
         log_request_details(client_ip, data, f"blocked – {attack_type}")
         return jsonify({"status": "blocked", "reason": attack_type}), 403
 
@@ -267,15 +317,28 @@ def log_request_details(ip: str, data: str, result: str) -> None:
     except Exception as exc:
         print(f"Log write error: {exc}")
 
-def add_blocked_ip(ip: str) -> None:
+blocked_ips = set()
+
+def add_blocked_ip(ip: str, reason: str) -> None:
     if ip in blocked_ips:
         return
     blocked_ips.add(ip)
     try:
         with open("blocked.txt", "a") as f:
-            f.write(ip + "\n")
+            f.write(f"{ip},{reason}\n")
     except Exception as exc:
         print(f"blocked.txt write error: {exc}")
+
+def get_top_blocked_ips_and_reasons(n: int = 5):
+    try:
+        with open("blocked.txt", "r") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        recent_entries = lines[-n:]
+        ips = [entry.split(",")[0] for entry in recent_entries]
+        reasons = [entry.split(",", 1)[1] if "," in entry else "Unknown" for entry in recent_entries]
+        return ips, reasons
+    except FileNotFoundError:
+        return [], []
 
 def print_statistics() -> None:
     sep = "-" * 48
