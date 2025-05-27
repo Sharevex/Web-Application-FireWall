@@ -186,7 +186,7 @@ def start_packet_sniffing():
 #                              Flask app                                     #
 ##############################################################################
 app = Flask(__name__)
-
+app.config['DEBUG'] = True
 
 def get_cpu_usage():
     total_cpu = psutil.cpu_percent(interval=1)
@@ -282,10 +282,10 @@ def firewall_route(path):
     if ddos_limiter.is_ddos(client_ip):
         stats.blocked_requests += 1
         stats.ddos_blocks += 1
-        add_blocked_ip(client_ip,reason)
-        log_request_details(client_ip, "<rate-limited>", "blocked – DDoS")
-        return jsonify({"status": "blocked", "reason": "DDoS detected (rate limit)"}), 429
-
+        reason = "DDoS detected (rate limit)"  # ← FIXED: define `reason` first
+        add_blocked_ip(client_ip, reason)
+        log_request_details(client_ip, "<rate-limited>", f"blocked – {reason}")
+        return jsonify({"status": "blocked", "reason": reason}), 429
     # --- 2) Payload inspection ---------------------------------------------
     data = request.get_data(as_text=True) or ""
     
@@ -314,9 +314,10 @@ def firewall_route(path):
     if rule_flag:
         stats.blocked_requests += 1
         stats.rule_based_blocks += 1
-        add_blocked_ip(client_ip,reason)
-        log_request_details(client_ip, data, f"blocked – {attack_type}")
-        return jsonify({"status": "blocked", "reason": attack_type}), 403
+        reason = attack_type  # ← FIXED: define `reason` first
+        add_blocked_ip(client_ip, reason)
+        log_request_details(client_ip, data, f"blocked – {reason}")
+        return jsonify({"status": "blocked", "reason": reason}), 403
 
     stats.allowed_requests += 1
     log_request_details(client_ip, data, "allowed")
