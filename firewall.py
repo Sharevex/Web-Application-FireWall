@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+
+
 """
 Combined Dynamic Firewall with:
 - Network-level IPS/IDS (packet sniffing with Scapy and ML-based detection)
@@ -13,7 +15,7 @@ import json
 import joblib
 import threading
 from collections import defaultdict, deque
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, render_template, request, make_response, redirect, url_for , jsonify , session
 import logging
 import numpy as np
 from scapy.all import sniff, IP, TCP, Raw
@@ -37,6 +39,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
 
 # ---------------------------------------------------------------------------
 # Environment / globals
@@ -187,6 +190,7 @@ def start_packet_sniffing():
 ##############################################################################
 app = Flask(__name__)
 app.config['DEBUG'] = True
+app.secret_key = 'Ja0RSgXjEotzDuPEVP4aS3jyQg3EUaKN'
 
 def get_cpu_usage():
     total_cpu = psutil.cpu_percent(interval=1)
@@ -248,6 +252,22 @@ def metrics():
     }
     return jsonify(data)
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = None
+    if request.method == 'POST':
+        username = request.form.get('username', '')
+        password = request.form.get('password', '')
+
+        if username == 'sharevex' and password == 'sharevex12345@#':
+            session['user'] = username  # set session flag
+            return redirect('/dashboard')
+        else:
+            error = 'Invalid username or password.'
+    return render_template('login.html', error=error)
+
+
+
 @app.route("/stats")
 def stats_endpoint():
     return jsonify(stats.to_dict())
@@ -259,17 +279,23 @@ def top_ips():
 
 @app.route("/dashboard")
 def dashboard():
-    top_ips, top_reasons = get_top_blocked_ips_and_reasons()
+    if session.get('user') != 'sharevex':
+        return redirect(url_for('login'))
 
-    # Requires a dashboard.html in templates/. Fallback simple page if missing.
+    top_ips, top_reasons = get_top_blocked_ips_and_reasons()
     try:
-        return render_template("dashboard.html",top_ips=top_ips, top_reasons=top_reasons)
+        return render_template(
+            "dashboard.html",
+            top_ips=top_ips,
+            top_reasons=top_reasons
+        )
     except Exception:
         return jsonify({
             "message": "Dashboard template not found – create templates/dashboard.html to enable the UI.",
-            "stats":   stats.to_dict(),
+            "stats": stats.to_dict(),
             "top_ips": dict(sorted(ip_request_count.items(), key=lambda kv: kv[1], reverse=True)[:5])
         })
+
 
 @app.route("/", defaults={"path": ""}, methods=["GET", "POST"])
 @app.route("/<path:path>", methods=["GET", "POST"])
