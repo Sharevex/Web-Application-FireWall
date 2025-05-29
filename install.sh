@@ -116,8 +116,8 @@ function show_menu() {
     while true; do
         clear
         menu_trap
-        echo -e "${BOLD}${CYAN}"
-        echo -e "================================================="
+        # Use -e on every colored/escaped line. Or use printf for more robustness.
+        echo -e "${BOLD}${CYAN}================================================="
         echo -e "         Web Application Firewall Installer       "
         echo -e "=================================================${RESET}"
         echo -e "${GREEN}  1)${RESET} ${BOLD}Install${RESET}"
