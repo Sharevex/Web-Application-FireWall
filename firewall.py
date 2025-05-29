@@ -9,7 +9,9 @@ Combined Dynamic Firewall with:
 """
 
 import os
+import sys
 import re
+import subprocess
 import time
 import json
 import joblib
@@ -434,5 +436,14 @@ if __name__ == "__main__":
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("Shutting down firewall…")
+        print("Quitting and running in the background…")
+        # Re-run the script in the background using setsid
+        subprocess.Popen(
+            [sys.executable] + sys.argv,
+            preexec_fn=os.setsid,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            close_fds=True
+        )
         os._exit(0)
