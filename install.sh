@@ -1,7 +1,10 @@
 #!/bin/bash
 set -e
+
+# Trap Ctrl+C and Ctrl+Z and move to background
+trap 'echo "Quitting and running in the background"; setsid "$0" "$@" >/dev/null 2>&1 & disown; exit 0' SIGINT SIGTSTP
+
 export DEBIAN_FRONTEND=noninteractive
-trap '' SIGINT  # Ignore Ctrl+C to allow script continuation
 
 PROJECT_DIR="/Web-Application-FireWall"
 REPO_URL="https://github.com/Sharevex/Web-Application-FireWall.git"
@@ -22,7 +25,6 @@ function setup_project() {
 
     cd "$PROJECT_DIR"
 
-    # Try apt install for supported packages, fallback to pip
     PY_PKGS=("netifaces" "colorama")
     APT_PKGS=()
     PIP_PKGS=()
