@@ -117,9 +117,9 @@ function show_menu() {
         clear
         menu_trap
         echo -e "${BOLD}${CYAN}"
-        echo "================================================="
-        echo "         Web Application Firewall Installer       "
-        echo "=================================================${RESET}"
+        echo -e "================================================="
+        echo -e "         Web Application Firewall Installer       "
+        echo -e "=================================================${RESET}"
         echo -e "${GREEN}  1)${RESET} ${BOLD}Install${RESET}"
         echo -e "${GREEN}  2)${RESET} ${BOLD}Update${RESET}"
         echo -e "${GREEN}  3)${RESET} ${BOLD}Uninstall${RESET}"
@@ -136,6 +136,7 @@ function show_menu() {
         esac
     done
 }
+
 
 # Entry point
 show_menu
