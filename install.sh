@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# ANSI colors for readability
+# ANSI color codes
 GREEN='\e[32m'
 BLUE='\e[34m'
 RED='\e[31m'
@@ -11,20 +11,29 @@ MAGENTA='\e[35m'
 RESET='\e[0m'
 BOLD='\e[1m'
 
-# Trap Ctrl+C and Ctrl+Z, run in background
-trap 'echo -e "${YELLOW}Quitting and running in the background${RESET}"; setsid "$0" "$@" >/dev/null 2>&1 & disown; exit 0' SIGINT SIGTSTP
-
 export DEBIAN_FRONTEND=noninteractive
 PROJECT_DIR="/Web-Application-FireWall"
 REPO_URL="https://github.com/Sharevex/Web-Application-FireWall.git"
 
+# --- MENU-specific trap for Ctrl+C/Z ---
+function menu_trap() {
+    trap 'echo -e "${MAGENTA}\nGoodbye!${RESET}"; exit 0' SIGINT SIGTSTP
+}
+# --- ACTION-specific trap for Ctrl+C/Z ---
+function action_trap() {
+    trap 'echo -e "${YELLOW}\nQuitting and running in the background${RESET}"; setsid "$0" "$@" >/dev/null 2>&1 & disown; exit 0' SIGINT SIGTSTP
+}
+
 function reset_project() {
+    action_trap
     echo -e "${RED}${BOLD}Resetting previous configuration...${RESET}"
     sudo rm -rf "$PROJECT_DIR"
     echo -e "${GREEN}Old project deleted.${RESET}"
+    trap - SIGINT SIGTSTP     # Restore trap so menu exits cleanly if Ctrl+C afterwards
 }
 
 function setup_project() {
+    action_trap
     echo -e "${CYAN}Installing dependencies and setting up the project...${RESET}"
     sudo apt update && sudo apt upgrade -y
     sudo apt install -y python3 python3-venv python3-full git build-essential curl
@@ -72,9 +81,12 @@ function setup_project() {
     echo "Running firewall.py and showing the output:"
     echo "------------------------------------------${RESET}"
     ./venv/bin/python3 firewall.py
+
+    trap - SIGINT SIGTSTP
 }
 
 function update_project() {
+    action_trap
     if [ -d "$PROJECT_DIR" ]; then
         echo -e "${BLUE}Updating existing project...${RESET}"
         cd "$PROJECT_DIR"
@@ -85,9 +97,11 @@ function update_project() {
     else
         echo -e "${RED}Project not found. Please install it first.${RESET}"
     fi
+    trap - SIGINT SIGTSTP
 }
 
 function uninstall_project() {
+    action_trap
     if [ -d "$PROJECT_DIR" ]; then
         echo -e "${YELLOW}Uninstalling project...${RESET}"
         sudo rm -rf "$PROJECT_DIR"
@@ -95,42 +109,32 @@ function uninstall_project() {
     else
         echo -e "${RED}Project not found.${RESET}"
     fi
+    trap - SIGINT SIGTSTP
 }
 
 function show_menu() {
-    clear
-    echo -e "${BOLD}${CYAN}"
-    echo "================================================="
-    echo "         Web Application Firewall Installer       "
-    echo "=================================================${RESET}"
-    echo -e "${GREEN}  1)${RESET} ${BOLD}Install${RESET}"
-    echo -e "${GREEN}  2)${RESET} ${BOLD}Update${RESET}"
-    echo -e "${GREEN}  3)${RESET} ${BOLD}Uninstall${RESET}"
-    echo -e "${GREEN}  4)${RESET} ${BOLD}Exit${RESET}"
-    echo -e "${CYAN}-------------------------------------------------${RESET}"
-    read -p "$(echo -e "${YELLOW}Choose an option [1-4]: ${RESET}")" option
+    while true; do
+        clear
+        menu_trap
+        echo -e "${BOLD}${CYAN}"
+        echo "================================================="
+        echo "         Web Application Firewall Installer       "
+        echo "=================================================${RESET}"
+        echo -e "${GREEN}  1)${RESET} ${BOLD}Install${RESET}"
+        echo -e "${GREEN}  2)${RESET} ${BOLD}Update${RESET}"
+        echo -e "${GREEN}  3)${RESET} ${BOLD}Uninstall${RESET}"
+        echo -e "${GREEN}  4)${RESET} ${BOLD}Exit${RESET}"
+        echo -e "${CYAN}-------------------------------------------------${RESET}"
+        read -p "$(echo -e "${YELLOW}Choose an option [1-4]: ${RESET}")" option
 
-    case "$option" in
-        1)
-            reset_project
-            setup_project
-            ;;
-        2)
-            update_project
-            ;;
-        3)
-            uninstall_project
-            ;;
-        4)
-            echo -e "${MAGENTA}Exiting...${RESET}"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}Invalid option. Please try again.${RESET}"
-            sleep 1
-            show_menu
-            ;;
-    esac
+        case "$option" in
+            1)  reset_project; setup_project ;;
+            2)  update_project ;;
+            3)  uninstall_project ;;
+            4)  echo -e "${MAGENTA}Exiting...${RESET}"; break ;;
+            *)  echo -e "${RED}Invalid option. Please try again.${RESET}"; sleep 1 ;;
+        esac
+    done
 }
 
 # Entry point
