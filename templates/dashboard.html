@@ -4,6 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
   <title>Firewall Dashboard</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
@@ -19,6 +20,7 @@
       --gauge-ram: #c661e9;
       --gauge-disk: #ffcc00;
       --gauge-bg: #2f3b54;
+      --navbar-bg: rgba(18, 23, 32, 0.98);
     }
 
     body {
@@ -28,8 +30,77 @@
       margin: 0;
       padding: 0;
       min-height: 100vh;
+      padding-top: 80px; /* Account for fixed navbar */
     }
 
+    /* Navbar Styles */
+    .navbar-custom {
+      background: var(--navbar-bg);
+      backdrop-filter: blur(10px);
+      border-bottom: 1.5px solid var(--border-dark);
+      box-shadow: 0 2px 20px rgba(0, 0, 0, 0.3);
+    }
+
+    .navbar-brand {
+      color: var(--accent-blue) !important;
+      font-weight: 700;
+      font-size: 1.4rem;
+      letter-spacing: 0.03em;
+      text-shadow: 0 2px 12px rgba(84, 170, 255, 0.3);
+    }
+
+    .navbar-brand:hover {
+      color: #7bb8ff !important;
+      text-shadow: 0 2px 16px rgba(84, 170, 255, 0.5);
+      transition: all 0.3s ease;
+    }
+
+    .navbar-nav .nav-link {
+      color: var(--text-secondary) !important;
+      font-weight: 500;
+      padding: 0.5rem 1rem !important;
+      border-radius: 0.5rem;
+      transition: all 0.3s ease;
+    }
+
+    .navbar-nav .nav-link:hover {
+      color: var(--text-primary) !important;
+      background-color: rgba(84, 170, 255, 0.1);
+      transform: translateY(-1px);
+    }
+
+    .btn-logout {
+      background: linear-gradient(135deg, #ff4757, #ff3838);
+      border: none;
+      color: white;
+      font-weight: 600;
+      padding: 0.5rem 1.2rem;
+      border-radius: 0.5rem;
+      transition: all 0.3s ease;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    }
+
+    .btn-logout:hover {
+      background: linear-gradient(135deg, #ff3838, #ff2f2f);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 15px rgba(255, 71, 87, 0.3);
+      color: white;
+    }
+
+    .navbar-toggler {
+      border: 1px solid var(--border-dark);
+      padding: 0.3rem 0.6rem;
+    }
+
+    .navbar-toggler:focus {
+      box-shadow: none;
+    }
+
+    .navbar-toggler-icon {
+      background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3e%3cpath stroke='rgba%28214, 227, 243, 0.8%29' stroke-linecap='round' stroke-miterlimit='10' stroke-width='2' d='m4 7h22M4 15h22M4 23h22'/%3e%3c/svg%3e");
+    }
+
+    /* Existing styles */
     .gauge-fg {
       stroke-linecap: round;
       transition: stroke-dashoffset 0.8s cubic-bezier(.73, 1.8, .25, 1);
@@ -128,10 +199,21 @@
       word-break: break-all;
     }
 
-    .stat-blue { color: #2196f3; }
-    .stat-green { color: #00b360; }
-    .stat-red { color: #ff3c3c; }
-    .stat-violet { color: #c661e9; }
+    .stat-blue {
+      color: #2196f3;
+    }
+
+    .stat-green {
+      color: #00b360;
+    }
+
+    .stat-red {
+      color: #ff3c3c;
+    }
+
+    .stat-violet {
+      color: #c661e9;
+    }
 
     .mono-text {
       font-family: 'Segoe UI Mono', monospace;
@@ -204,6 +286,64 @@
 </head>
 
 <body>
+  <!-- Navigation Bar -->
+  <nav class="navbar navbar-expand-lg fixed-top navbar-custom">
+    <div class="container-fluid">
+      <a class="navbar-brand d-flex align-items-center" href="#">
+        <span class="emoji-icon me-2" style="font-size: 1.8rem;">🔥</span>
+        Firewall Dashboard
+      </a>
+
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+
+      <div class="collapse navbar-collapse" id="navbarNav">
+        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+          <li class="nav-item">
+            <a class="nav-link active" href="#monitoring">
+              <i class="bi bi-speedometer2 me-1"></i>
+              Monitoring
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" href="#stats">
+              <i class="bi bi-bar-chart me-1"></i>
+              Statistics
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" href="#settings">
+              <i class="bi bi-gear me-1"></i>
+              Settings
+            </a>
+          </li>
+        </ul>
+        
+        <!-- User Info and Logout -->
+        <div class="navbar-nav">
+          <div class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" role="button" data-bs-toggle="dropdown">
+              <span class="me-2">👤</span>
+              Admin
+            </a>
+            <ul class="dropdown-menu dropdown-menu-end" style="background: var(--card-bg); border: 1px solid var(--border-dark);">
+              <li><a class="dropdown-item" href="#" style="color: var(--text-secondary);">Profile</a></li>
+              <li><a class="dropdown-item" href="#" style="color: var(--text-secondary);">Settings</a></li>
+              <li><hr class="dropdown-divider" style="border-color: var(--border-dark);"></li>
+              <li>
+                <button class="dropdown-item btn-logout" onclick="logout()" style="color: white; background: linear-gradient(135deg, #ff4757, #ff3838); margin: 0.2rem; border-radius: 0.4rem;">
+                  <span class="me-1">🚪</span>
+                  Logout
+                </button>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
   <div class="container-custom">
     <h1 class="display-4 text-center mb-5 main-title text-shadow-blue d-flex align-items-center justify-content-center">
       <span class="emoji-icon me-3" style="font-size: 3rem;">🔥</span>
@@ -217,9 +357,10 @@
         <div class="card card-custom p-4 text-center">
           <div class="gauge-container">
             <svg width="115" height="115">
-              <circle class="stroke-gauge-bg" stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5" r="46" />
-              <circle class="gauge-fg" stroke="var(--gauge-cpu)" stroke-width="13" fill="none" id="cpu_circle" cx="57.5" cy="57.5" r="46"
-                stroke-dasharray="289" stroke-dashoffset="289" />
+              <circle class="stroke-gauge-bg" stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5"
+                r="46" />
+              <circle class="gauge-fg" stroke="var(--gauge-cpu)" stroke-width="13" fill="none" id="cpu_circle" cx="57.5"
+                cy="57.5" r="46" stroke-dasharray="289" stroke-dashoffset="289" />
             </svg>
             <div class="gauge-text text-shadow-gauge" id="cpu_percent">0%</div>
           </div>
@@ -235,16 +376,17 @@
         <div class="card card-custom p-4 text-center">
           <div class="gauge-container">
             <svg width="115" height="115">
-              <circle class="stroke-gauge-bg" stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5" r="46" />
-              <circle class="gauge-fg" stroke="var(--gauge-ram)" stroke-width="13" fill="none" id="ram_circle" cx="57.5" cy="57.5" r="46"
-                stroke-dasharray="289" stroke-dashoffset="289" />
+              <circle class="stroke-gauge-bg" stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5"
+                r="46" />
+              <circle class="gauge-fg" stroke="var(--gauge-ram)" stroke-width="13" fill="none" id="ram_circle" cx="57.5"
+                cy="57.5" r="46" stroke-dasharray="289" stroke-dashoffset="289" />
             </svg>
             <div class="gauge-text text-shadow-gauge" id="ram_percent">0%</div>
           </div>
           <div class="text-secondary-custom text-center">RAM Usage</div>
           <div class="text-muted-custom text-center">
-            <span id="ram_used" class="mono-text text-shadow-mono">--</span> / <span
-              id="ram_total" class="mono-text text-shadow-mono">--</span> GB
+            <span id="ram_used" class="mono-text text-shadow-mono">--</span> / <span id="ram_total"
+              class="mono-text text-shadow-mono">--</span> GB
           </div>
         </div>
       </div>
@@ -254,26 +396,28 @@
         <div class="card card-custom p-4 text-center">
           <div class="gauge-container">
             <svg width="115" height="115">
-              <circle class="stroke-gauge-bg" stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5" r="46" />
-              <circle class="gauge-fg" stroke="var(--gauge-disk)" stroke-width="13" fill="none" id="disk_circle" cx="57.5" cy="57.5" r="46"
-                stroke-dasharray="289" stroke-dashoffset="289" />
+              <circle class="stroke-gauge-bg" stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5"
+                r="46" />
+              <circle class="gauge-fg" stroke="var(--gauge-disk)" stroke-width="13" fill="none" id="disk_circle"
+                cx="57.5" cy="57.5" r="46" stroke-dasharray="289" stroke-dashoffset="289" />
             </svg>
             <div class="gauge-text text-shadow-gauge" id="disk_percent">0%</div>
           </div>
           <div class="text-secondary-custom text-center">Disk Usage</div>
           <div class="text-muted-custom text-center">
-            <span id="disk_used" class="mono-text text-shadow-mono">-</span> / <span
-              id="disk_total" class="mono-text text-shadow-mono">-</span> GB
+            <span id="disk_used" class="mono-text text-shadow-mono">-</span> / <span id="disk_total"
+              class="mono-text text-shadow-mono">-</span> GB
           </div>
         </div>
       </div>
     </div>
 
     <!-- Firewall Stats -->
-    <div class="row g-4 mb-5">
+    <div class="row g-4 mb-5" id="stats">
       <!-- Top Blocked IPs - Left -->
       <div class="col-12 col-md-6">
-        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-start" style="min-height: 100px;">
+        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-start"
+          style="min-height: 100px;">
           <span class="card-title-custom">Top Blocked IPs</span>
           <ul id="top_blocked_ips" class="list-custom w-100">
             {% for ip in top_ips %}
@@ -285,7 +429,8 @@
 
       <!-- Block Reasons - Right -->
       <div class="col-12 col-md-6">
-        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-start" style="min-height: 100px;">
+        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-start"
+          style="min-height: 100px;">
           <span class="card-title-custom">Block Reasons</span>
           <ul id="block_reasons" class="list-custom w-100">
             {% for reason in top_reasons %}
@@ -297,42 +442,54 @@
 
       <!-- Stat Cards - Centered Text -->
       <div class="col-12 col-md-6 col-xl-4">
-        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center" style="min-height: 100px;">
+        <div
+          class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
+          style="min-height: 100px;">
           <span class="card-title-custom">Total Requests</span>
           <span class="stat-value stat-blue text-shadow-stat" id="total_requests">9</span>
         </div>
       </div>
 
       <div class="col-12 col-md-6 col-xl-4">
-        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center" style="min-height: 100px;">
+        <div
+          class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
+          style="min-height: 100px;">
           <span class="card-title-custom">Allowed Requests</span>
           <span class="stat-value stat-green text-shadow-green" id="allowed_requests">9</span>
         </div>
       </div>
 
       <div class="col-12 col-md-6 col-xl-4">
-        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center" style="min-height: 100px;">
+        <div
+          class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
+          style="min-height: 100px;">
           <span class="card-title-custom">Blocked Requests</span>
           <span class="stat-value stat-red text-shadow-red" id="blocked_requests">0</span>
         </div>
       </div>
 
       <div class="col-12 col-md-6 col-xl-4">
-        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center" style="min-height: 100px;">
+        <div
+          class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
+          style="min-height: 100px;">
           <span class="card-title-custom">DDoS Blocks</span>
           <span class="stat-value stat-red text-shadow-red" id="ddos_blocks">0</span>
         </div>
       </div>
 
       <div class="col-12 col-md-6 col-xl-4">
-        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center" style="min-height: 100px;">
+        <div
+          class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
+          style="min-height: 100px;">
           <span class="card-title-custom">AI-based Blocks</span>
           <span class="stat-value stat-violet text-shadow-violet" id="ai_based_blocks">0</span>
         </div>
       </div>
 
       <div class="col-12 col-md-6 col-xl-4">
-        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center" style="min-height: 100px;">
+        <div
+          class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
+          style="min-height: 100px;">
           <span class="card-title-custom">Uptime</span>
           <span class="stat-value stat-violet text-shadow-violet" id="uptime">0</span>
         </div>
@@ -346,6 +503,24 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   <script>
+    // --- LOGOUT FUNCTION ---
+    function logout() {
+      if (confirm('Are you sure you want to logout?')) {
+        // You can customize this to make an API call to your backend
+        fetch('/logout', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          }
+        }).then(() => {
+          window.location.href = '/login'; // Redirect to login page
+        }).catch(() => {
+          // If the endpoint doesn't exist, just redirect anyway
+          window.location.href = '/login';
+        });
+      }
+    }
+
     // --- SYSTEM MONITORING ---
     // For SVG gauge, 2𝜋r = ~289 (r=46)
     function setGauge(circle, percent) {
@@ -393,18 +568,32 @@
     }
 
     function updateMetrics() {
-  fetch('/metrics')
-    .then(response => response.json())
-    .then(data => {
-      if (data.uptime && data.uptime.formatted) {
-        document.getElementById('uptime').innerText = data.uptime.formatted;
-      }
-      // Optionally update other stats here (cpu, ram, etc.)
-    })
-    .catch(error => {
-      console.error('Error fetching metrics:', error);
+      fetch('/metrics')
+        .then(response => response.json())
+        .then(data => {
+          if (data.uptime && data.uptime.formatted) {
+            document.getElementById('uptime').innerText = data.uptime.formatted;
+          }
+          // Optionally update other stats here (cpu, ram, etc.)
+        })
+        .catch(error => {
+          console.error('Error fetching metrics:', error);
+        });
+    }
+
+    // --- SMOOTH SCROLLING FOR NAVBAR LINKS ---
+    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+      anchor.addEventListener('click', function (e) {
+        e.preventDefault();
+        const target = document.querySelector(this.getAttribute('href'));
+        if (target) {
+          target.scrollIntoView({
+            behavior: 'smooth',
+            block: 'start'
+          });
+        }
+      });
     });
-}
 
     // --- INIT ---
     updateMetrics();
