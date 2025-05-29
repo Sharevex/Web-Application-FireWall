@@ -64,26 +64,61 @@ function setup_project() {
     ./venv/bin/python3 firewall.py
 }
 
-### Main Logic ###
-if [[ "$1" == "--reset" ]]; then
-    reset_project
-    setup_project
-else
+function update_project() {
     if [ -d "$PROJECT_DIR" ]; then
-        echo "Project already exists in $PROJECT_DIR"
-        read -p "Do you want to reset and reinstall it? (y/n): " choice
-        if [[ "$choice" =~ ^[Yy]$ ]]; then
+        echo "Updating existing project..."
+        cd "$PROJECT_DIR"
+        git pull
+        source venv/bin/activate
+        ./venv/bin/python3 ai_detector.py
+        ./venv/bin/python3 firewall.py
+    else
+        echo "Project not found. Please install it first."
+    fi
+}
+
+function uninstall_project() {
+    if [ -d "$PROJECT_DIR" ]; then
+        echo "Uninstalling project..."
+        sudo rm -rf "$PROJECT_DIR"
+        echo "Project removed."
+    else
+        echo "Project not found."
+    fi
+}
+
+function show_menu() {
+    echo "========================================"
+    echo "   Web Application Firewall Installer"
+    echo "========================================"
+    echo "1) Install"
+    echo "2) Update"
+    echo "3) Uninstall"
+    echo "4) Exit"
+    echo "========================================"
+    read -p "Choose an option [1-4]: " option
+
+    case "$option" in
+        1)
             reset_project
             setup_project
-        else
-            echo "Skipping reset. Updating project instead..."
-            cd "$PROJECT_DIR"
-            git pull
-            source venv/bin/activate
-            ./venv/bin/python3 ai_detector.py
-            ./venv/bin/python3 firewall.py
-        fi
-    else
-        setup_project
-    fi
-fi
+            ;;
+        2)
+            update_project
+            ;;
+        3)
+            uninstall_project
+            ;;
+        4)
+            echo "Exiting..."
+            exit 0
+            ;;
+        *)
+            echo "Invalid option. Please try again."
+            show_menu
+            ;;
+    esac
+}
+
+# Entry point
+show_menu
