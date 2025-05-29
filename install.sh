@@ -116,23 +116,22 @@ function show_menu() {
     while true; do
         clear
         menu_trap
-        # Use -e on every colored/escaped line. Or use printf for more robustness.
-        echo -e "${BOLD}${CYAN}================================================="
-        echo -e "         Web Application Firewall Installer       "
-        echo -e "=================================================${RESET}"
-        echo -e "${GREEN}  1)${RESET} ${BOLD}Install${RESET}"
-        echo -e "${GREEN}  2)${RESET} ${BOLD}Update${RESET}"
-        echo -e "${GREEN}  3)${RESET} ${BOLD}Uninstall${RESET}"
-        echo -e "${GREEN}  4)${RESET} ${BOLD}Exit${RESET}"
-        echo -e "${CYAN}-------------------------------------------------${RESET}"
-        read -p "$(echo -e "${YELLOW}Choose an option [1-4]: ${RESET}")" option
+        printf "${BOLD}${CYAN}=================================================\n"
+        printf "         Web Application Firewall Installer       \n"
+        printf "=================================================${RESET}\n"
+        printf "${GREEN}  1)${RESET} ${BOLD}Install${RESET}\n"
+        printf "${GREEN}  2)${RESET} ${BOLD}Update${RESET}\n"
+        printf "${GREEN}  3)${RESET} ${BOLD}Uninstall${RESET}\n"
+        printf "${GREEN}  4)${RESET} ${BOLD}Exit${RESET}\n"
+        printf "${CYAN}-------------------------------------------------${RESET}\n"
+        read -p "$(printf "${YELLOW}Choose an option [1-4]: ${RESET}")" option
 
         case "$option" in
             1)  reset_project; setup_project ;;
             2)  update_project ;;
             3)  uninstall_project ;;
-            4)  echo -e "${MAGENTA}Exiting...${RESET}"; break ;;
-            *)  echo -e "${RED}Invalid option. Please try again.${RESET}"; sleep 1 ;;
+            4)  printf "${MAGENTA}Exiting...${RESET}\n"; break ;;
+            *)  printf "${RED}Invalid option. Please try again.${RESET}\n"; sleep 1 ;;
         esac
     done
 }
