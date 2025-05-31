@@ -6,3 +6,4 @@ pandas
 scikit-learn
 openpyxl
 psutil
+mysql-connector-python
