@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-
 """
 Combined Dynamic Firewall with:
 - Network-level IPS/IDS (packet sniffing with Scapy and ML-based detection)
@@ -23,7 +22,371 @@ import numpy as np
 from scapy.all import sniff, IP, TCP, Raw
 import psutil
 import random
+import mysql.connector
+import base64
+import hashlib
+from datetime import datetime, timedelta
 
+# Load database configuration from file
+def load_db_config():
+    config_file = "/Web-Application-FireWall/database_config.txt"
+    config = {}
+    try:
+        with open(config_file, 'r') as f:
+            for line in f:
+                if line.strip() and not line.startswith('#'):
+                    if '=' in line:
+                        key, value = line.strip().split('=', 1)
+                        config[key] = value
+        
+        return {
+            'host': config.get('DATABASE_HOST', 'localhost'),
+            'user': config.get('DATABASE_USER', 'admin_user'),
+            'password': config.get('DATABASE_PASSWORD', ''),
+            'database': config.get('DATABASE_NAME', 'admin'),
+            'port': int(config.get('DATABASE_PORT', '3306'))
+        }
+    except FileNotFoundError:
+        print(f"Database config file not found: {config_file}")
+        return {
+            'host': 'localhost',
+            'user': 'admin_user',
+            'password': 'your_db_password',
+            'database': 'admin',
+            'port': 3306
+        }
+
+DB_CONFIG = load_db_config()
+
+def get_db_connection():
+    """Create and return a database connection"""
+    try:
+        connection = mysql.connector.connect(**DB_CONFIG)
+        return connection
+    except mysql.connector.Error as err:
+        print(f"Database connection error: {err}")
+        return None
+
+def init_database_tables():
+    """Initialize additional tables for temporary storage"""
+    connection = get_db_connection()
+    if not connection:
+        return False
+    
+    try:
+        cursor = connection.cursor()
+        
+        # Create temporary blocked IPs table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS temp_blocked_ips (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                ip_address VARCHAR(45) NOT NULL,
+                reason VARCHAR(255),
+                blocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE,
+                INDEX idx_ip_active (ip_address, is_active),
+                INDEX idx_expires (expires_at)
+            )
+        """)
+        
+        # Create temporary request logs table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS temp_request_logs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                ip_address VARCHAR(45) NOT NULL,
+                request_data TEXT,
+                result VARCHAR(50),
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP,
+                INDEX idx_ip_timestamp (ip_address, timestamp),
+                INDEX idx_expires (expires_at)
+            )
+        """)
+        
+        # Create temporary statistics table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS temp_statistics (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                stat_key VARCHAR(100) NOT NULL,
+                stat_value INT DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP,
+                UNIQUE KEY unique_stat (stat_key)
+            )
+        """)
+        
+        # Create temporary IP request counts table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS temp_ip_requests (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                ip_address VARCHAR(45) NOT NULL,
+                request_count INT DEFAULT 1,
+                last_request TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP,
+                UNIQUE KEY unique_ip (ip_address)
+            )
+        """)
+        
+        connection.commit()
+        print("Database tables initialized successfully")
+        return True
+        
+    except mysql.connector.Error as err:
+        print(f"Database table creation error: {err}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+def cleanup_expired_data():
+    """Clean up expired temporary data from database"""
+    connection = get_db_connection()
+    if not connection:
+        return
+    
+    try:
+        cursor = connection.cursor()
+        now = datetime.now()
+        
+        # Clean up expired blocked IPs
+        cursor.execute("DELETE FROM temp_blocked_ips WHERE expires_at < %s", (now,))
+        
+        # Clean up expired request logs
+        cursor.execute("DELETE FROM temp_request_logs WHERE expires_at < %s", (now,))
+        
+        # Clean up expired statistics
+        cursor.execute("DELETE FROM temp_statistics WHERE expires_at < %s", (now,))
+        
+        # Clean up expired IP request counts
+        cursor.execute("DELETE FROM temp_ip_requests WHERE expires_at < %s", (now,))
+        
+        connection.commit()
+        
+    except mysql.connector.Error as err:
+        print(f"Database cleanup error: {err}")
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+def save_blocked_ip_to_db(ip_address, reason, duration_hours=24):
+    """Save blocked IP to database temporarily"""
+    connection = get_db_connection()
+    if not connection:
+        return False
+    
+    try:
+        cursor = connection.cursor()
+        expires_at = datetime.now() + timedelta(hours=duration_hours)
+        
+        query = """
+            INSERT INTO temp_blocked_ips (ip_address, reason, expires_at)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+            reason = VALUES(reason),
+            blocked_at = CURRENT_TIMESTAMP,
+            expires_at = VALUES(expires_at),
+            is_active = TRUE
+        """
+        
+        cursor.execute(query, (ip_address, reason, expires_at))
+        connection.commit()
+        return True
+        
+    except mysql.connector.Error as err:
+        print(f"Database save blocked IP error: {err}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+def is_ip_blocked_in_db(ip_address):
+    """Check if IP is blocked in database"""
+    connection = get_db_connection()
+    if not connection:
+        return False
+    
+    try:
+        cursor = connection.cursor()
+        now = datetime.now()
+        
+        query = """
+            SELECT id FROM temp_blocked_ips 
+            WHERE ip_address = %s AND is_active = TRUE AND expires_at > %s
+        """
+        
+        cursor.execute(query, (ip_address, now))
+        result = cursor.fetchone()
+        return result is not None
+        
+    except mysql.connector.Error as err:
+        print(f"Database check blocked IP error: {err}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+def save_request_log_to_db(ip_address, request_data, result, duration_hours=168):  # 7 days default
+    """Save request log to database temporarily"""
+    connection = get_db_connection()
+    if not connection:
+        return False
+    
+    try:
+        cursor = connection.cursor()
+        expires_at = datetime.now() + timedelta(hours=duration_hours)
+        
+        query = """
+            INSERT INTO temp_request_logs (ip_address, request_data, result, expires_at)
+            VALUES (%s, %s, %s, %s)
+        """
+        
+        cursor.execute(query, (ip_address, request_data[:1000], result, expires_at))  # Limit data length
+        connection.commit()
+        return True
+        
+    except mysql.connector.Error as err:
+        print(f"Database save request log error: {err}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+def update_ip_request_count_in_db(ip_address, duration_hours=24):
+    """Update IP request count in database"""
+    connection = get_db_connection()
+    if not connection:
+        return False
+    
+    try:
+        cursor = connection.cursor()
+        expires_at = datetime.now() + timedelta(hours=duration_hours)
+        
+        query = """
+            INSERT INTO temp_ip_requests (ip_address, request_count, expires_at)
+            VALUES (%s, 1, %s)
+            ON DUPLICATE KEY UPDATE
+            request_count = request_count + 1,
+            last_request = CURRENT_TIMESTAMP,
+            expires_at = VALUES(expires_at)
+        """
+        
+        cursor.execute(query, (ip_address, expires_at))
+        connection.commit()
+        return True
+        
+    except mysql.connector.Error as err:
+        print(f"Database update IP count error: {err}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+def get_top_ips_from_db(limit=5):
+    """Get top IPs by request count from database"""
+    connection = get_db_connection()
+    if not connection:
+        return []
+    
+    try:
+        cursor = connection.cursor()
+        now = datetime.now()
+        
+        query = """
+            SELECT ip_address, request_count 
+            FROM temp_ip_requests 
+            WHERE expires_at > %s 
+            ORDER BY request_count DESC 
+            LIMIT %s
+        """
+        
+        cursor.execute(query, (now, limit))
+        results = cursor.fetchall()
+        return [(ip, count) for ip, count in results]
+        
+    except mysql.connector.Error as err:
+        print(f"Database get top IPs error: {err}")
+        return []
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+def save_statistics_to_db(stats_dict, duration_hours=24):
+    """Save statistics to database temporarily"""
+    connection = get_db_connection()
+    if not connection:
+        return False
+    
+    try:
+        cursor = connection.cursor()
+        expires_at = datetime.now() + timedelta(hours=duration_hours)
+        
+        for key, value in stats_dict.items():
+            query = """
+                INSERT INTO temp_statistics (stat_key, stat_value, expires_at)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                stat_value = VALUES(stat_value),
+                updated_at = CURRENT_TIMESTAMP,
+                expires_at = VALUES(expires_at)
+            """
+            
+            cursor.execute(query, (key, value, expires_at))
+        
+        connection.commit()
+        return True
+        
+    except mysql.connector.Error as err:
+        print(f"Database save statistics error: {err}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+def hash_credential(credential):
+    """Hash a credential using SHA256 and return base64 encoded result"""
+    hashed = hashlib.sha256(credential.encode('utf-8')).digest()
+    return base64.b64encode(hashed).decode('utf-8')
+
+def verify_credentials(username, password):
+    """Verify username and password against the database"""
+    connection = get_db_connection()
+    if not connection:
+        return False
+    try:
+        cursor = connection.cursor()
+        
+        # Hash the provided credentials
+        hashed_username = hash_credential(username)
+        hashed_password = hash_credential(password)
+        
+        # Query to check if user exists with matching credentials
+        query = """
+        SELECT u.id 
+        FROM users u 
+        WHERE u.username = %s AND u.password_hash = %s AND u.is_active = TRUE
+        """
+        
+        cursor.execute(query, (username, hashed_password))
+        result = cursor.fetchone()
+        
+        return result is not None
+        
+    except mysql.connector.Error as err:
+        print(f"Database query error: {err}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
 
 # Import the AI detector (must be present in PYTHONPATH)
 from ai_detector import detect_attack
@@ -41,7 +404,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
-
 
 # ---------------------------------------------------------------------------
 # Environment / globals
@@ -98,6 +460,10 @@ class FirewallStats:
             "ai_based_blocks": self.ai_based_blocks,
             "network_blocks": self.network_blocks,
         }
+
+    def save_to_db(self):
+        """Save current statistics to database"""
+        save_statistics_to_db(self.to_dict())
 
 # Instantiate globals
 ddos_limiter = DDoSRateLimiter(time_window=60, max_requests=20)
@@ -170,7 +536,11 @@ def block_ip(ip_address: str) -> None:
     logging.info(f"Blocking IP {ip_address} using command:\n  {cmd}")
     os.system(cmd)
     stats.network_blocks += 1
-    add_blocked_ip(ip_address)
+    add_blocked_ip(ip_address, "Network-level threat detected")
+
+def is_ip_blocked(ip: str) -> bool:
+    # Check both in-memory and database
+    return ip in blocked_ips or is_ip_blocked_in_db(ip)
 
 def process_packet(packet):
     if not packet.haslayer(IP):
@@ -217,7 +587,6 @@ def get_uptime():
         "formatted": f"{uptime_days}d {uptime_hours}h {uptime_minutes}m {uptime_seconds}s"
     }
 
-
 # Get RAM usage
 def get_ram_usage():
     memory = psutil.virtual_memory()
@@ -243,8 +612,12 @@ def get_disk_usage():
         return disk_data
     except PermissionError:
         return []  # Return empty list if permission denied
+
 @app.route('/metrics')
 def metrics():
+    client_ip = request.remote_addr or "unknown"
+    if is_ip_blocked(client_ip):
+        return jsonify({"status": "blocked", "reason": "IP blacklisted"}), 403
     data = {
         "cpu": get_cpu_usage(),
         "ram": get_ram_usage(),
@@ -256,31 +629,46 @@ def metrics():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    client_ip = request.remote_addr or "unknown"
+    if is_ip_blocked(client_ip):
+        return jsonify({"status": "blocked", "reason": "IP blacklisted"}), 403
+    
     error = None
     if request.method == 'POST':
         username = request.form.get('username', '')
         password = request.form.get('password', '')
-
-        if username == 'sharevex' and password == 'sharevex12345@#':
+        
+        if not username or not password:
+            error = 'Username and password are required.'
+        elif verify_credentials(username, password):
             session['user'] = username  # set session flag
             return redirect('/dashboard')
         else:
             error = 'Invalid username or password.'
+    
     return render_template('login.html', error=error)
-
-
 
 @app.route("/stats")
 def stats_endpoint():
+    client_ip = request.remote_addr or "unknown"
+    if is_ip_blocked(client_ip):
+        return jsonify({"status": "blocked", "reason": "IP blacklisted"}), 403
     return jsonify(stats.to_dict())
 
 @app.route("/top_ips")
 def top_ips():
-    top5 = sorted(ip_request_count.items(), key=lambda kv: kv[1], reverse=True)[:5]
-    return jsonify(dict(top5))
+    # Get top IPs from database instead of in-memory
+    top_ips_db = get_top_ips_from_db(5)
+    return jsonify(dict(top_ips_db))
 
 @app.route("/dashboard")
 def dashboard():
+    client_ip = request.remote_addr or "unknown"
+    
+    if is_ip_blocked(client_ip):
+        logging.warning(f"Blocked IP {client_ip} attempted dashboard access")
+        return jsonify({"status": "blocked", "reason": "IP blacklisted"}), 403
+
     if session.get('user') != 'sharevex':
         return redirect(url_for('login'))
 
@@ -295,9 +683,8 @@ def dashboard():
         return jsonify({
             "message": "Dashboard template not found – create templates/dashboard.html to enable the UI.",
             "stats": stats.to_dict(),
-            "top_ips": dict(sorted(ip_request_count.items(), key=lambda kv: kv[1], reverse=True)[:5])
+            "top_ips": dict(get_top_ips_from_db(5))
         })
-
 
 @app.route("/", defaults={"path": ""}, methods=["GET", "POST"])
 @app.route("/<path:path>", methods=["GET", "POST"])
@@ -305,15 +692,19 @@ def firewall_route(path):
     client_ip = request.remote_addr or "unknown"
     stats.total_requests += 1
     ip_request_count[client_ip] += 1
+    
+    # Update IP request count in database
+    update_ip_request_count_in_db(client_ip)
 
     # --- 1) DDoS limiter ----------------------------------------------------
     if ddos_limiter.is_ddos(client_ip):
         stats.blocked_requests += 1
         stats.ddos_blocks += 1
-        reason = "DDoS detected (rate limit)"  # ← FIXED: define `reason` first
+        reason = "DDoS detected (rate limit)"
         add_blocked_ip(client_ip, reason)
         log_request_details(client_ip, "<rate-limited>", f"blocked – {reason}")
         return jsonify({"status": "blocked", "reason": reason}), 429
+    
     # --- 2) Payload inspection ---------------------------------------------
     data = request.get_data(as_text=True) or ""
     
@@ -335,14 +726,14 @@ def firewall_route(path):
         stats.blocked_requests += 1
         stats.ai_based_blocks += 1
         reason = {1: "SQLi (AI)", 2: "XSS (AI)", 3: "DDoS (AI)"}.get(ai_label, "Anomaly (AI)")
-        add_blocked_ip(client_ip,reason)
+        add_blocked_ip(client_ip, reason)
         log_request_details(client_ip, data, f"blocked – {reason}")
         return jsonify({"status": "blocked", "reason": reason}), 403
 
     if rule_flag:
         stats.blocked_requests += 1
         stats.rule_based_blocks += 1
-        reason = attack_type  # ← FIXED: define `reason` first
+        reason = attack_type
         add_blocked_ip(client_ip, reason)
         log_request_details(client_ip, data, f"blocked – {reason}")
         return jsonify({"status": "blocked", "reason": reason}), 403
@@ -359,10 +750,20 @@ def log_request_details(ip: str, data: str, result: str) -> None:
     try:
         with open("firewall.log", "a") as f:
             f.write(line)
+        # Also save to database temporarily
+        save_request_log_to_db(ip, data, result)
     except Exception as exc:
         print(f"Log write error: {exc}")
 
-blocked_ips = set()
+def load_blocked_ips():
+    try:
+        with open("blocked.txt", "r") as f:
+            for line in f:
+                if ',' in line:
+                    ip, _ = line.strip().split(",", 1)
+                    blocked_ips.add(ip)
+    except FileNotFoundError:
+        pass
 
 def add_blocked_ip(ip: str, reason: str) -> None:
     if ip in blocked_ips:
@@ -371,6 +772,8 @@ def add_blocked_ip(ip: str, reason: str) -> None:
     try:
         with open("blocked.txt", "a") as f:
             f.write(f"{ip},{reason}\n")
+        # Also save to database temporarily (24 hours default)
+        save_blocked_ip_to_db(ip, reason, 24)
     except Exception as exc:
         print(f"blocked.txt write error: {exc}")
 
@@ -391,14 +794,23 @@ def print_statistics() -> None:
     for k, v in stats.to_dict().items():
         print(f"{k.replace('_', ' ').title():22}: {v}")
     print("Top 5 IPs:")
-    for ip, cnt in sorted(ip_request_count.items(), key=lambda kv: kv[1], reverse=True)[:5]:
+    
+    # Get top IPs from database
+    top_ips_db = get_top_ips_from_db(5)
+    for ip, cnt in top_ips_db:
         print(f"  {ip:>15}  -> {cnt}")
     print(sep)
+    
+    # Save statistics to database
+    stats.save_to_db()
 
 def dynamic_update() -> None:
     while True:
         time.sleep(10)
         print_statistics()
+        # Clean up expired data every 10 minutes
+        if int(time.time()) % 600 == 0:  # Every 10 minutes
+            cleanup_expired_data()
 
 def run_server() -> None:
     logging.info("Starting Flask server on 0.0.0.0:8080")
@@ -413,12 +825,19 @@ def deployment_helper() -> None:
     print("Top IPs Endpoint  : http://0.0.0.0:8080/top_ips")
     print("Log File          : firewall.log")
     print("Blocked IPs File  : blocked.txt")
+    print("Database Storage  : ACTIVE (temporary data)")
     print("===========================================\n")
 
 ##############################################################################
 #                                Main                                        #
 ##############################################################################
 if __name__ == "__main__":
+    # Initialize database tables
+    init_database_tables()
+    
+    # Load existing blocked IPs
+    load_blocked_ips()
+    
     sniff_thread = threading.Thread(target=start_packet_sniffing, daemon=True)
     sniff_thread.start()
 
