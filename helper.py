@@ -1,736 +1,571 @@
-#!/bin/bash
-
-# Enhanced Web Application Firewall Installer with Proper Signal Handling
-# Author: Enhanced version with fixed interrupt handling
-# Description: Automated installer for Web Application Firewall with reliable signal handling
-
-set -euo pipefail
-
-# =================================================================
-# CONFIGURATION & CONSTANTS
-# =================================================================
-
-declare -A COLORS=(
-    ["GREEN"]='\e[32m'
-    ["BLUE"]='\e[34m'
-    ["RED"]='\e[31m'
-    ["YELLOW"]='\e[33m'
-    ["CYAN"]='\e[36m'
-    ["MAGENTA"]='\e[35m'
-    ["WHITE"]='\e[37m'
-    ["RESET"]='\e[0m'
-    ["BOLD"]='\e[1m'
-    ["DIM"]='\e[2m'
-)
-
-readonly PROJECT_NAME="Web-Application-FireWall"
-readonly PROJECT_DIR="/${PROJECT_NAME}"
-readonly REPO_URL="https://github.com/Sharevex/Web-Application-FireWall.git"
-readonly LOG_FILE="/tmp/waf_installer.log"
-readonly BACKUP_DIR="/tmp/waf_backup_$(date +%Y%m%d_%H%M%S)"
-readonly PID_FILE="/tmp/waf_project.pid"
-readonly BG_LOG_FILE="/tmp/waf_background.log"
-readonly VENV_DIR="$PROJECT_DIR/venv"
-
-export DEBIAN_FRONTEND=noninteractive
-
-# Global flags
-INTERRUPTIBLE=true
-NORMAL_EXIT=false
-FORCE_CLEANUP=false
-
-# =================================================================
-# SIGNAL HANDLING - FIXED VERSION
-# =================================================================
-
-# Cleanup function - only kills processes if forced or interrupted
-cleanup_and_exit() {
-    # Don't cleanup if this is a normal menu exit
-    if [[ "$NORMAL_EXIT" == "true" ]]; then
-        return 0
-    fi
-
-    echo -e "\n${COLORS[YELLOW]}Cleaning up and exiting...${COLORS[RESET]}"
-
-    # Only kill child processes if we were interrupted or explicitly asked to cleanup
-    if [[ "$FORCE_CLEANUP" == "true" ]]; then
-        local children=$(jobs -p 2>/dev/null || true)
-        if [[ -n "$children" ]]; then
-            echo "Stopping background jobs..."
-            kill $children 2>/dev/null || true
-            wait $children 2>/dev/null || true
-        fi
-    fi
-
-    # Reset terminal
-    stty sane 2>/dev/null || true
-
-    echo -e "${COLORS[CYAN]}Log file: $LOG_FILE${COLORS[RESET]}"
-    exit 0
-}
-
-# Safe interrupt handler - preserves background processes unless explicitly stopped
-safe_interrupt_handler() {
-    if [[ "$INTERRUPTIBLE" == "true" ]]; then
-        echo -e "\n${COLORS[YELLOW]}=== Interrupted! ===${COLORS[RESET]}"
-        echo -e "${COLORS[CYAN]}Options:${COLORS[RESET]}"
-        echo -e "${COLORS[GREEN]}1) Start project in background and return to menu${COLORS[RESET]}"
-        echo -e "${COLORS[BLUE]}2) Return to main menu${COLORS[RESET]}"
-        echo -e "${COLORS[RED]}3) Exit completely (preserves background processes)${COLORS[RESET]}"
-        echo -e "${COLORS[RED]}4) Exit and stop all processes${COLORS[RESET]}"
-
-        # Use timeout to prevent hanging on read
-        echo -n "$(echo -e "${COLORS[YELLOW]}Choose [1-4] (auto-select 2 in 10s): ${COLORS[RESET]}")"
-
-        if read -t 10 -n 1 choice 2>/dev/null; then
-            echo
-        else
-            echo -e "\n${COLORS[DIM]}Timeout - returning to menu${COLORS[RESET]}"
-            choice="2"
-        fi
-
-        case "${choice:-2}" in
-        1)
-            echo -e "${COLORS[GREEN]}Starting project in background...${COLORS[RESET]}"
-            start_project_background "firewall.py" 2>/dev/null || true
-            return 0
-            ;;
-        2)
-            echo -e "${COLORS[BLUE]}Returning to menu...${COLORS[RESET]}"
-            return 0
-            ;;
-        3)
-            echo -e "${COLORS[GREEN]}Exiting (background processes will continue)...${COLORS[RESET]}"
-            NORMAL_EXIT=true
-            exit 0
-            ;;
-        4)
-            echo -e "${COLORS[RED]}Stopping all processes and exiting...${COLORS[RESET]}"
-            FORCE_CLEANUP=true
-            cleanup_and_exit
-            ;;
-        *)
-            echo -e "${COLORS[BLUE]}Invalid choice, returning to menu...${COLORS[RESET]}"
-            return 0
-            ;;
-        esac
-    else
-        # Force exit if not in interruptible state
-        echo -e "\n${COLORS[RED]}Force interrupting...${COLORS[RESET]}"
-        FORCE_CLEANUP=true
-        cleanup_and_exit
-    fi
-}
-
-# Set up proper signal traps
-setup_traps() {
-    # Handle Ctrl+C (SIGINT) and Ctrl+Z (SIGTSTP)
-    trap 'safe_interrupt_handler' SIGINT
-    trap 'safe_interrupt_handler' SIGTSTP
-    # Handle script termination - but don't auto-cleanup on normal exit
-    trap 'cleanup_and_exit' SIGTERM
-}
-
-# Disable interrupts during critical operations
-disable_interrupts() {
-    INTERRUPTIBLE=false
-    trap 'echo -e "\n${COLORS[RED]}Please wait, critical operation in progress...${COLORS[RESET]}"' SIGINT SIGTSTP
-}
-
-# Re-enable interrupts
-enable_interrupts() {
-    INTERRUPTIBLE=true
-    setup_traps
-}
-
-# =================================================================
-# BACKGROUND EXECUTION FUNCTIONS - IMPROVED
-# =================================================================
-
-start_project_background() {
-    local project_file="${1:-firewall.py}"
-
-    if [[ ! -d "$PROJECT_DIR" ]]; then
-        log "ERROR" "Project not installed. Please install first."
-        return 1
-    fi
-
-    cd "$PROJECT_DIR" || return 1
-
-    if [[ ! -f "$project_file" ]]; then
-        log "ERROR" "$project_file not found in project directory"
-        return 1
-    fi
-
-    # Check if already running
-    if is_project_running; then
-        local existing_pid=$(cat "$PID_FILE" 2>/dev/null)
-        log "WARN" "Project is already running in background (PID: $existing_pid)"
-        return 0
-    fi
-
-    log "INFO" "Starting $project_file in background..."
-
-    # Ensure virtual environment exists
-    if [[ ! -f "./venv/bin/python3" ]]; then
-        log "ERROR" "Virtual environment not found. Please reinstall the project."
-        return 1
-    fi
-
-    # Start the project in background with proper redirection
-    nohup ./venv/bin/python3 "$project_file" </dev/null >>"$BG_LOG_FILE" 2>&1 &
-    local pid=$!
-
-    # Disown the process so it won't be killed when the script exits
-    disown
-
-    # Save PID for later reference
-    echo "$pid" >"$PID_FILE"
-
-    # Brief wait to check if it started successfully
-    sleep 2
-
-    if kill -0 "$pid" 2>/dev/null; then
-        log "SUCCESS" "Project started successfully in background (PID: $pid)"
-        log "INFO" "Background logs: $BG_LOG_FILE"
-        log "INFO" "Process is detached and will continue after script exit"
-        return 0
-    else
-        log "ERROR" "Failed to start project in background"
-        rm -f "$PID_FILE"
-        return 1
-    fi
-}
-
-is_project_running() {
-    if [[ -f "$PID_FILE" ]]; then
-        local pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            return 0
-        else
-            rm -f "$PID_FILE"
-            return 1
-        fi
-    fi
-    return 1
-}
-
-stop_project_background() {
-    if [[ ! -f "$PID_FILE" ]]; then
-        log "INFO" "No background process running"
-        return 0
-    fi
-
-    local pid=$(cat "$PID_FILE" 2>/dev/null)
-    if [[ -z "$pid" ]]; then
-        log "WARN" "Invalid PID file, cleaning up..."
-        rm -f "$PID_FILE"
-        return 0
-    fi
-
-    if kill -0 "$pid" 2>/dev/null; then
-        log "INFO" "Stopping background process (PID: $pid)..."
-
-        # Graceful shutdown
-        kill -TERM "$pid" 2>/dev/null || true
-
-        # Wait up to 5 seconds for graceful shutdown
-        for i in {1..5}; do
-            if ! kill -0 "$pid" 2>/dev/null; then
-                break
-            fi
-            sleep 1
-        done
-
-        # Force kill if still running
-        if kill -0 "$pid" 2>/dev/null; then
-            log "WARN" "Process still running, forcing termination..."
-            kill -KILL "$pid" 2>/dev/null || true
-            sleep 1
-        fi
-
-        if ! kill -0 "$pid" 2>/dev/null; then
-            log "SUCCESS" "Background process stopped successfully"
-        else
-            log "ERROR" "Failed to stop background process"
-            return 1
-        fi
-    else
-        log "INFO" "Background process was not running"
-    fi
-
-    rm -f "$PID_FILE"
-    return 0
-}
-
-# =================================================================
-# UTILITY FUNCTIONS - IMPROVED
-# =================================================================
-
-log() {
-    local level="$1"
-    shift
-    local message="$*"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-
-    case "$level" in
-    "INFO") echo -e "${COLORS[CYAN]}[INFO]${COLORS[RESET]} $message" ;;
-    "WARN") echo -e "${COLORS[YELLOW]}[WARN]${COLORS[RESET]} $message" ;;
-    "ERROR") echo -e "${COLORS[RED]}[ERROR]${COLORS[RESET]} $message" ;;
-    "SUCCESS") echo -e "${COLORS[GREEN]}[SUCCESS]${COLORS[RESET]} $message" ;;
-    esac
-
-    # Log to file with error handling
-    echo "[$timestamp] [$level] $message" >>"$LOG_FILE" 2>/dev/null || true
-}
-
-# Safe progress indicator that can be interrupted
-show_progress() {
-    local message="$1"
-    local duration="${2:-3}"
-
-    echo -ne "${COLORS[CYAN]}$message"
-    for ((i = 0; i < duration; i++)); do
-        if [[ "$INTERRUPTIBLE" == "false" ]]; then
-            echo -n "."
-        else
-            # Use brief sleep to allow interruption
-            sleep 0.2
-            echo -n "."
-            sleep 0.2
-            echo -n "."
-            sleep 0.2
-            echo -n "."
-            sleep 0.2
-            echo -n "."
-            sleep 0.2
-        fi
-    done
-    echo -e "${COLORS[RESET]}"
-}
-
-# Safe read with timeout
-safe_read() {
-    local prompt="$1"
-    local timeout="${2:-30}"
-    local default="${3:-}"
-
-    echo -n "$prompt"
-    if read -t "$timeout" -r REPLY 2>/dev/null; then
-        echo
-    else
-        echo -e "\n${COLORS[DIM]}Timeout - using default: ${default:-N}${COLORS[RESET]}"
-        REPLY="$default"
-    fi
-}
-
-# =================================================================
-# CORE FUNCTIONS - WITH PROPER SIGNAL HANDLING
-# =================================================================
-
-setup_project() {
-    log "INFO" "Starting Web Application Firewall installation..."
-
-    # Disable interrupts during critical package operations
-    disable_interrupts
-
-    log "INFO" "Updating system packages..."
-    if ! sudo apt update -qq 2>/dev/null; then
-        log "ERROR" "Failed to update package lists"
-        enable_interrupts
-        return 1
-    fi
-
-    log "INFO" "Installing base dependencies..."
-    local base_packages=("python3" "python3-venv" "python3-full" "git" "build-essential")
-
-    if ! sudo apt install -y "${base_packages[@]}" -qq 2>/dev/null; then
-        log "ERROR" "Failed to install base packages"
-        enable_interrupts
-        return 1
-    fi
-
-    # Re-enable interrupts for git operations
-    enable_interrupts
-
-    log "INFO" "Cloning project repository..."
-    if [[ -d "$PROJECT_DIR" ]]; then
-        log "WARN" "Project directory exists, removing..."
-        sudo rm -rf "$PROJECT_DIR"
-    fi
-
-    # Git clone with timeout to prevent hanging
-    if ! timeout 60s sudo git clone "$REPO_URL" "$PROJECT_DIR"; then
-        log "ERROR" "Failed to clone repository (timeout or network error)"
-        return 1
-    fi
-
-    sudo chown -R "$USER":"$USER" "$PROJECT_DIR" 2>/dev/null || true
-    cd "$PROJECT_DIR" || {
-        log "ERROR" "Cannot access project directory"
-        return 1
-    }
-
-    # Setup Python environment
-    setup_python_environment || {
-        log "ERROR" "Python setup failed"
-        return 1
-    }
-
-    log "SUCCESS" "Installation completed successfully!"
-
-    # Ask if user wants to start in background
-    safe_read "$(echo -e "${COLORS[YELLOW]}Start firewall in background now? [y/N]: ${COLORS[RESET]}")" 10 "N"
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        start_project_background "firewall.py"
-
-        # Wait a moment for firewall to initialize
-        sleep 2
+#!/usr/bin/env python3
+"""
+helper.py - Database setup script for admin database
+Identifies OS, installs MySQL if needed, and creates database with users table
+Handles auth_socket authentication issue and auto-secures root with root:root
+"""
+
+import platform
+import sys
+import subprocess
+import os
+import hashlib
+import time
+import socket
+
+def identify_os():
+    """Identify the operating system"""
+    system = platform.system().lower()
+    if system == 'linux':
+        try:
+            with open('/etc/os-release', 'r') as f:
+                content = f.read().lower()
+                if 'ubuntu' in content or 'debian' in content:
+                    return 'ubuntu'
+                elif 'centos' in content or 'rhel' in content or 'fedora' in content:
+                    return 'centos'
+                return 'linux'
+        except FileNotFoundError:
+            return 'linux'
+    elif system == 'darwin':
+        return 'mac'
+    elif system == 'windows':
+        return 'windows'
+    return 'unknown'
+
+def check_port_open(host='localhost', port=3306, timeout=5):
+    """Check if MySQL port is open"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
+
+def run_command(command, use_sudo=False, input_text=None, timeout=30):
+    """Run a system command with better error handling"""
+    if use_sudo and os.geteuid() != 0:
+        command = f"sudo {command}"
+    
+    try:
+        print(f"Running: {command}")
+        if input_text is not None:
+            proc = subprocess.Popen(
+                command, shell=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            out, err = proc.communicate(input=input_text, timeout=timeout)
+            code = proc.returncode
+        else:
+            proc = subprocess.run(
+                command, shell=True,
+                capture_output=True, text=True, timeout=timeout
+            )
+            out, err, code = proc.stdout, proc.stderr, proc.returncode
+
+        if code == 0:
+            print("✓ Command executed successfully")
+            if out and out.strip():
+                print(f"Output: {out.strip()}")
+            return True, out
+        else:
+            print(f"✗ Command failed (code {code})")
+            if err and err.strip():
+                print(f"Error: {err.strip()}")
+            return False, err
+    except subprocess.TimeoutExpired:
+        print(f"✗ Command timed out after {timeout} seconds")
+        return False, "Command timeout"
+    except Exception as e:
+        print(f"✗ Exception: {e}")
+        return False, str(e)
+
+def install_mysql_connector():
+    """Install mysql-connector-python"""
+    print("Installing mysql-connector-python...")
+    
+    # Try pip3 first
+    ok, _ = run_command("pip3 install mysql-connector-python")
+    if ok:
+        return True
+    
+    # Try pip
+    ok, _ = run_command("pip install mysql-connector-python")
+    if ok:
+        return True
+    
+    # Try with --user flag
+    ok, _ = run_command("pip3 install --user mysql-connector-python")
+    if ok:
+        return True
+    
+    print("✗ Failed to install mysql-connector-python")
+    return False
+
+def wait_for_mysql_start(max_wait=30):
+    """Wait for MySQL to start and be ready for connections"""
+    print("Waiting for MySQL to start...")
+    for i in range(max_wait):
+        if check_port_open():
+            print("✓ MySQL is ready for connections")
+            time.sleep(2)  # Give it a bit more time to fully initialize
+            return True
+        time.sleep(1)
+        if i % 5 == 0:
+            print(f"Still waiting... ({i}/{max_wait}s)")
+    
+    print("✗ MySQL did not start within expected time")
+    return False
+
+def install_mysql_ubuntu():
+    """Install MySQL on Ubuntu/Debian"""
+    print("Installing MySQL Server on Ubuntu/Debian...")
+    
+    # Update package list
+    if not run_command("apt update", use_sudo=True)[0]:
+        print("✗ Failed to update package list")
+        return False
+    
+    # Set non-interactive mode
+    os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
+    
+    # Install MySQL server
+    if not run_command("apt install -y mysql-server", use_sudo=True)[0]:
+        print("✗ Failed to install MySQL server")
+        return False
+    
+    # Start MySQL service
+    if not run_command("systemctl start mysql", use_sudo=True)[0]:
+        print("✗ Failed to start MySQL service")
+        return False
+    
+    # Enable MySQL on boot
+    ok, _ = run_command("systemctl enable mysql", use_sudo=True)
+    if not ok:
+        print("Warning: Could not enable MySQL on boot")
+    
+    # Wait for MySQL to be ready
+    if not wait_for_mysql_start():
+        return False
+    
+    print("✓ MySQL installed and started successfully")
+    return True
+
+def install_mysql_centos():
+    """Install MySQL on CentOS/RHEL/Fedora"""
+    print("Installing MySQL Server on CentOS/RHEL/Fedora...")
+    
+    # Try different package managers
+    package_managers = [
+        ("dnf install -y mysql-server", "systemctl start mysqld"),
+        ("yum install -y mysql-server", "systemctl start mysqld"),
+        ("yum install -y mariadb-server", "systemctl start mariadb")
+    ]
+    
+    for install_cmd, start_cmd in package_managers:
+        if run_command(install_cmd, use_sudo=True)[0]:
+            if run_command(start_cmd, use_sudo=True)[0]:
+                run_command(start_cmd.replace("start", "enable"), use_sudo=True)
+                if wait_for_mysql_start():
+                    print("✓ MySQL/MariaDB installed and started successfully")
+                    return True
+            break
+    
+    print("✗ Failed to install MySQL/MariaDB")
+    return False
+
+def install_mysql_mac():
+    """Install MySQL on macOS"""
+    print("Installing MySQL on macOS...")
+    
+    # Check if Homebrew is installed
+    if not run_command("which brew")[0]:
+        print("Homebrew not found. Please install Homebrew first:")
+        print("/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")
+        return False
+    
+    # Install MySQL via Homebrew
+    if not run_command("brew install mysql")[0]:
+        print("✗ Failed to install MySQL via Homebrew")
+        return False
+    
+    # Start MySQL service
+    if not run_command("brew services start mysql")[0]:
+        print("✗ Failed to start MySQL service")
+        return False
+    
+    if wait_for_mysql_start():
+        print("✓ MySQL installed and started successfully")
+        return True
+    
+    return False
+
+def fix_mysql_auth_and_secure():
+    """Automatically secure MySQL with root:root credentials"""
+    print("Configuring MySQL authentication and security...")
+    root_password = "root"
+
+    sql_commands = f"""
+ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{root_password}';
+DELETE FROM mysql.user WHERE User='';
+DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost','127.0.0.1','::1');
+DROP DATABASE IF EXISTS test;
+DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
+FLUSH PRIVILEGES;
+SELECT 'MySQL secured with root:root' AS Status;
+"""
+    
+    tmp_file = '/tmp/mysql_secure.sql'
+    try:
+        with open(tmp_file, 'w') as f:
+            f.write(sql_commands)
         
-        # Ask separately about running helper.py for configuration
-        safe_read "$(echo -e "${COLORS[YELLOW]}Run configuration helper now? [y/N]: ${COLORS[RESET]}")" 10 "Y"
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log "INFO" "Running helper.py for configuration..."
-            source "$VENV_DIR/bin/activate"
+        # Try different methods to execute SQL
+        methods = [
+            f"mysql < {tmp_file}",
+            f"mysql -u root < {tmp_file}",
+            f"mysql --defaults-file=/dev/null -u root < {tmp_file}"
+        ]
+        
+        for method in methods:
+            ok, output = run_command(method, use_sudo=True)
+            if ok:
+                print("✓ MySQL root password set to 'root'")
+                os.remove(tmp_file)
+                return root_password
+        
+        print("✗ Failed to secure MySQL with all methods")
+        os.remove(tmp_file)
+        return None
+        
+    except Exception as e:
+        print(f"✗ Error securing MySQL: {e}")
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+        return None
+
+def hash_password(password):
+    """Hash password using SHA-256"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def get_user_credentials():
+    """Get username and password for the new user"""
+    print("\nCreate New User Account")
+    print("-" * 25)
+    
+    # Get username
+    username = input("Enter username: ").strip()
+    while not username or len(username) < 3:
+        if not username:
+            print("Username cannot be empty!")
+        else:
+            print("Username must be at least 3 characters long!")
+        username = input("Enter username: ").strip()
+    
+    # Get password
+    import getpass
+    password = getpass.getpass("Enter password: ")
+    while not password or len(password) < 4:
+        if not password:
+            print("Password cannot be empty!")
+        else:
+            print("Password must be at least 4 characters long!")
+        password = getpass.getpass("Enter password: ")
+    
+    # Confirm password
+    confirm_password = getpass.getpass("Confirm password: ")
+    while password != confirm_password:
+        print("Passwords don't match!")
+        password = getpass.getpass("Enter password: ")
+        confirm_password = getpass.getpass("Confirm password: ")
+    
+    return username, password
+
+def create_db_user_sudo(username, user_password):
+    """Create database and user via sudo mysql"""
+    print("Creating database and user via sudo mysql...")
+    password_hash = hash_password(user_password)
+    
+    sql_commands = f"""
+CREATE DATABASE IF NOT EXISTS admin;
+USE admin;
+CREATE TABLE IF NOT EXISTS users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(50) UNIQUE NOT NULL,
+  password_hash VARCHAR(64) NOT NULL,
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+INSERT INTO users (username, password_hash, is_active)
+VALUES ('{username}', '{password_hash}', TRUE)
+ON DUPLICATE KEY UPDATE
+password_hash = '{password_hash}',
+updated_at = CURRENT_TIMESTAMP;
+SELECT 'Database and user created successfully' AS Status;
+"""
+    
+    tmp_file = '/tmp/create_db_user.sql'
+    try:
+        with open(tmp_file, 'w') as f:
+            f.write(sql_commands)
+        
+        ok, output = run_command(f"mysql < {tmp_file}", use_sudo=True)
+        os.remove(tmp_file)
+        
+        if ok:
+            print("✓ admin database and users table created")
+            print(f"✓ User '{username}' created/updated successfully")
+            return True
+        else:
+            print("✗ Failed to create database/user")
+            return False
             
-            # Ensure we have proper terminal access for interactive input
-            if [[ -t 0 ]]; then
-                python3 helper.py
-            else
-                # Force terminal allocation if stdin is not a terminal
-                python3 helper.py < /dev/tty
-            fi
-        else
-            log "INFO" "Configuration skipped. You can run 'cd $PROJECT_DIR && source venv/bin/activate && python3 helper.py' later"
-        fi
-    fi
-}
+    except Exception as e:
+        print(f"✗ Error creating database/user: {e}")
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+        return False
 
+def create_db_user_with_password(root_password, username, user_password):
+    """Create database and user using root password"""
+    try:
+        import mysql.connector
+        
+        # Connect to MySQL
+        connection = mysql.connector.connect(
+            host='localhost',
+            user='root',
+            password=root_password,
+            auth_plugin='mysql_native_password',
+            connect_timeout=10,
+            autocommit=True
+        )
+        
+        cursor = connection.cursor()
+        
+        # Create database
+        cursor.execute("CREATE DATABASE IF NOT EXISTS admin")
+        print("✓ admin database created")
+        
+        # Use the database
+        cursor.execute("USE admin")
+        
+        # Create users table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                password_hash VARCHAR(64) NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        """)
+        print("✓ users table created")
+        
+        # Insert user
+        password_hash = hash_password(user_password)
+        cursor.execute("""
+            INSERT INTO users (username, password_hash, is_active) 
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+            password_hash = %s,
+            updated_at = CURRENT_TIMESTAMP
+        """, (username, password_hash, True, password_hash))
+        
+        print(f"✓ User '{username}' created/updated successfully")
+        
+        cursor.close()
+        connection.close()
+        return True
+        
+    except mysql.connector.Error as e:
+        print(f"✗ MySQL Error: {e}")
+        return False
+    except Exception as e:
+        print(f"✗ Error: {e}")
+        return False
 
-setup_python_environment() {
-    log "INFO" "Setting up Python virtual environment..."
+def test_mysql_connection():
+    """Test MySQL connection methods"""
+    print("Testing MySQL connection methods...")
+    
+    # First check if MySQL is running
+    if not check_port_open():
+        print("✗ MySQL server is not running on port 3306")
+        return 'not_running', None
+    
+    try:
+        import mysql.connector
+        
+        # Test no password access
+        try:
+            connection = mysql.connector.connect(
+                host='localhost',
+                user='root',
+                password='',
+                connect_timeout=5
+            )
+            connection.close()
+            print("✓ No-password access available")
+            return 'no_password', ''
+        except mysql.connector.Error:
+            pass
+        
+        # Test with default root password
+        try:
+            connection = mysql.connector.connect(
+                host='localhost',
+                user='root',
+                password='root',
+                connect_timeout=5
+            )
+            connection.close()
+            print("✓ Root password is 'root'")
+            return 'password', 'root'
+        except mysql.connector.Error:
+            pass
+        
+    except ImportError:
+        print("mysql-connector-python not available for testing")
+    
+    # Test auth_socket via sudo
+    try:
+        result = subprocess.run(
+            ['sudo', 'mysql', '-e', 'SELECT 1;'],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            print("✓ Auth_socket access available")
+            return 'auth_socket', None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    
+    print("? Password authentication required (unknown password)")
+    return 'password_required', None
 
-    # Remove existing venv if present
-    [[ -d "venv" ]] && rm -rf venv
+def ensure_mysql_installed():
+    """Ensure MySQL is installed and running"""
+    os_type = identify_os()
+    
+    if not check_port_open():
+        print("MySQL not running. Attempting to install/start...")
+        
+        if os_type == 'ubuntu':
+            if not install_mysql_ubuntu():
+                return False
+        elif os_type == 'centos':
+            if not install_mysql_centos():
+                return False
+        elif os_type == 'mac':
+            if not install_mysql_mac():
+                return False
+        else:
+            print(f"✗ Unsupported OS: {os_type}")
+            print("Please install MySQL manually and ensure it's running on port 3306")
+            return False
+    
+    return True
 
-    # Create virtual environment with timeout
-    if ! timeout 30s python3 -m venv venv; then
-        log "ERROR" "Failed to create virtual environment"
-        return 1
-    fi
+def main():
+    """Main function"""
+    print("=" * 60)
+    print("MySQL Database Setup Script with Enhanced Error Handling")
+    print("=" * 60)
+    
+    if os.geteuid() != 0:
+        print("Note: sudo may be required for some operations")
 
-    # Activate and setup
-    source venv/bin/activate || {
-        log "ERROR" "Cannot activate virtual environment"
-        return 1
-    }
+    os_type = identify_os()
+    print(f"Detected OS: {os_type.upper()}")
 
-    log "INFO" "Upgrading pip..."
-    python -m pip install --upgrade pip -q --timeout 30 || {
-        log "WARN" "Pip upgrade failed, continuing..."
-    }
+    # Install mysql-connector-python if needed
+    try:
+        import mysql.connector
+        print("✓ mysql-connector-python is available")
+    except ImportError:
+        print("mysql-connector-python not found, installing...")
+        if not install_mysql_connector():
+            print("✗ Could not install mysql-connector-python")
+            sys.exit(1)
+        try:
+            import mysql.connector
+            print("✓ mysql-connector-python installed successfully")
+        except ImportError:
+            print("✗ mysql-connector-python installation failed")
+            sys.exit(1)
 
-    # Install requirements if available
-    if [[ -f "requirements.txt" ]]; then
-        log "INFO" "Installing project requirements..."
-        if ! pip install -r requirements.txt -q --timeout 60; then
-            log "WARN" "Some packages may have failed to install"
-        fi
-    fi
+    # Ensure MySQL is installed and running
+    if not ensure_mysql_installed():
+        print("✗ Failed to ensure MySQL is running")
+        sys.exit(1)
 
-    log "SUCCESS" "Python environment setup completed"
-}
+    # Test connection methods
+    connection_type, root_password = test_mysql_connection()
+    
+    if connection_type == 'not_running':
+        print("✗ MySQL server is not running")
+        sys.exit(1)
+    elif connection_type == 'no_password':
+        print("Fresh MySQL installation detected → securing with root:root")
+        root_password = fix_mysql_auth_and_secure()
+        if not root_password:
+            print("✗ Failed to secure MySQL")
+            sys.exit(1)
+        connection_type = 'password'
+    elif connection_type == 'auth_socket':
+        print("Auth_socket detected → securing with root:root")
+        root_password = fix_mysql_auth_and_secure()
+        if not root_password:
+            print("✗ Failed to secure MySQL")
+            sys.exit(1)
+        connection_type = 'password'
+    elif connection_type == 'password_required':
+        print("Password authentication required")
+        root_password = input("Enter MySQL root password (or press Enter for 'root'): ").strip()
+        if not root_password:
+            root_password = "root"
+        connection_type = 'password'
 
-# =================================================================
-# SYSTEM COMMAND INSTALLATION FUNCTION
-# =================================================================
+    # Get user credentials
+    username, user_password = get_user_credentials()
 
-install_system_command() {
-    local script_path="$(realpath "$0")"
-    local command_name="firewall"
-    local install_dir="/usr/local/bin"
-    local scripts_dir="/usr/local/bin/custom-scripts"
+    # Create database and user
+    success = False
+    if connection_type == 'password':
+        success = create_db_user_with_password(root_password, username, user_password)
+    else:
+        success = create_db_user_sudo(username, user_password)
 
-    log "INFO" "Installing system command '$command_name'..."
+    # Final status
+    if success:
+        print("\n" + "=" * 60)
+        print("Setup completed successfully!")
+        print("=" * 60)
+        print(f"Database: admin")
+        print(f"Table: users")
+        print(f"User: {username} (active)")
+        print(f"MySQL root password: {root_password}")
+        print(f"\nYou can now connect with: mysql -u root -p{root_password}")
+        print("Or test the connection with the created user account.")
+    else:
+        print("\n✗ Setup failed")
+        sys.exit(1)
 
-    # Check if we have sudo access
-    if ! sudo -n true 2>/dev/null; then
-        log "WARN" "Sudo access required for system command installation"
-        safe_read "$(echo -e "${COLORS[YELLOW]}Enter sudo password to continue or press Enter to skip: ${COLORS[RESET]}")" 30 ""
-        if [[ -z "$REPLY" ]]; then
-            log "INFO" "System command installation skipped"
-            return 0
-        fi
-    fi
-
-    # Create custom scripts directory
-    if ! sudo mkdir -p "$scripts_dir"; then
-        log "ERROR" "Failed to create scripts directory"
-        return 1
-    fi
-
-    # Copy script to permanent location
-    local target_script="$scripts_dir/${command_name}.sh"
-    if ! sudo cp "$script_path" "$target_script"; then
-        log "ERROR" "Failed to copy script to $target_script"
-        return 1
-    fi
-
-    # Make it executable
-    if ! sudo chmod +x "$target_script"; then
-        log "ERROR" "Failed to make script executable"
-        return 1
-    fi
-
-    # Create symbolic link
-    local symlink_path="$install_dir/$command_name"
-    if [[ -L "$symlink_path" ]] || [[ -f "$symlink_path" ]]; then
-        log "WARN" "Command '$command_name' already exists, removing old version..."
-        sudo rm -f "$symlink_path" 2>/dev/null || true
-    fi
-
-    if ! sudo ln -s "$target_script" "$symlink_path"; then
-        log "ERROR" "Failed to create symbolic link"
-        return 1
-    fi
-
-    # Verify installation
-    if command -v "$command_name" >/dev/null 2>&1; then
-        log "SUCCESS" "System command '$command_name' installed successfully!"
-        log "INFO" "You can now run '$command_name' from anywhere in the terminal"
-        log "INFO" "Script location: $target_script"
-        log "INFO" "Command link: $symlink_path"
-        return 0
-    else
-        log "ERROR" "Command installation verification failed"
-        return 1
-    fi
-}
-
-remove_system_command() {
-    local command_name="firewall"
-    local install_dir="/usr/local/bin"
-    local scripts_dir="/usr/local/bin/custom-scripts"
-    local symlink_path="$install_dir/$command_name"
-    local target_script="$scripts_dir/${command_name}.sh"
-
-    log "INFO" "Removing system command '$command_name'..."
-
-    # Check if command exists
-    if ! command -v "$command_name" >/dev/null 2>&1; then
-        log "INFO" "System command '$command_name' is not installed"
-        return 0
-    fi
-
-    # Remove symbolic link
-    if [[ -L "$symlink_path" ]] || [[ -f "$symlink_path" ]]; then
-        if sudo rm -f "$symlink_path"; then
-            log "SUCCESS" "Removed command link: $symlink_path"
-        else
-            log "WARN" "Failed to remove command link"
-        fi
-    fi
-
-    # Remove script file
-    if [[ -f "$target_script" ]]; then
-        if sudo rm -f "$target_script"; then
-            log "SUCCESS" "Removed script file: $target_script"
-        else
-            log "WARN" "Failed to remove script file"
-        fi
-    fi
-
-    # Remove scripts directory if empty
-    if [[ -d "$scripts_dir" ]] && [[ -z "$(ls -A "$scripts_dir" 2>/dev/null)" ]]; then
-        if sudo rmdir "$scripts_dir" 2>/dev/null; then
-            log "INFO" "Removed empty scripts directory"
-        fi
-    fi
-
-    # Verify removal
-    if ! command -v "$command_name" >/dev/null 2>&1; then
-        log "SUCCESS" "System command '$command_name' removed successfully!"
-        return 0
-    else
-        log "WARN" "Command may still be accessible (check your PATH)"
-        return 1
-    fi
-}
-
-# =================================================================
-# MENU SYSTEM - WITH SAFE INPUT HANDLING
-# =================================================================
-
-show_menu() {
-    setup_traps
-
-    while true; do
-        clear
-
-        # Header
-        echo -e "${COLORS[BOLD]}${COLORS[CYAN]}"
-        echo "================================================================="
-        echo "              Web Application Firewall Installer                "
-        echo "================================================================="
-        echo -e "${COLORS[RESET]}"
-
-        # Show background status
-        if is_project_running; then
-            local pid=$(cat "$PID_FILE" 2>/dev/null)
-            echo -e "${COLORS[GREEN]}🟢 Background Process: RUNNING (PID: $pid)${COLORS[RESET]}"
-        else
-            echo -e "${COLORS[DIM]}⚫ Background Process: Not Running${COLORS[RESET]}"
-        fi
-        echo
-
-        # Menu options
-        # Menu options
-        echo -e "${COLORS[GREEN]}  1)${COLORS[RESET]} Install/Reinstall Project"
-        echo -e "${COLORS[BLUE]}  2)${COLORS[RESET]} Start Project in Background"
-        echo -e "${COLORS[YELLOW]}  3)${COLORS[RESET]} Stop Background Process"
-        echo -e "${COLORS[CYAN]}  4)${COLORS[RESET]} Check Status"
-        echo -e "${COLORS[MAGENTA]}  5)${COLORS[RESET]} View Background Logs"
-        echo -e "${COLORS[RED]}  6)${COLORS[RESET]} Uninstall Project"
-        echo -e "${COLORS[GREEN]}  7)${COLORS[RESET]} Install 'firewall' system command"
-        echo -e "${COLORS[RED]}  8)${COLORS[RESET]} Remove 'firewall' system command"
-        echo -e "${COLORS[WHITE]}  9)${COLORS[RESET]} Exit (preserve background processes)"
-        echo -e "${COLORS[RED]} 10)${COLORS[RESET]} Exit and stop all processes"
-        echo
-
-        # Safe input with timeout
-        safe_read "$(echo -e "${COLORS[YELLOW]}Choose option [1-10]: ${COLORS[RESET]}")" 30 "9"
-
-        case "${REPLY:-9}" in
-        1) setup_project ;;
-        2)
-            if [[ -d "$PROJECT_DIR" ]]; then
-                start_project_background "firewall.py"
-            else
-                log "ERROR" "Project not installed"
-            fi
-            safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-            ;;
-        3)
-            stop_project_background
-            safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-            ;;
-        4)
-            show_project_status
-            safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-            ;;
-        5)
-            view_background_logs
-            ;;
-        6)
-            uninstall_project
-            ;;
-        7)
-            install_system_command
-            safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-            ;;
-        8)
-            remove_system_command
-            safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-            ;;
-        9)
-            # Normal exit - preserve background processes
-            NORMAL_EXIT=true
-            break
-            ;;
-        10)
-            # Exit and cleanup
-            echo -e "${COLORS[YELLOW]}Stopping all background processes...${COLORS[RESET]}"
-            stop_project_background
-            NORMAL_EXIT=true
-            break
-            ;;
-        *)
-            log "ERROR" "Invalid option"
-            sleep 1
-            ;;
-        esac
-
-    done
-}
-
-show_project_status() {
-    echo -e "${COLORS[CYAN]}${COLORS[BOLD]}PROJECT STATUS${COLORS[RESET]}"
-    echo "================================="
-
-    if [[ -d "$PROJECT_DIR" ]]; then
-        echo -e "${COLORS[GREEN]}✓ Project: INSTALLED${COLORS[RESET]}"
-        echo -e "Location: $PROJECT_DIR"
-
-        if is_project_running; then
-            local pid=$(cat "$PID_FILE" 2>/dev/null)
-            echo -e "${COLORS[GREEN]}✓ Background: RUNNING (PID: $pid)${COLORS[RESET]}"
-        else
-            echo -e "${COLORS[RED]}✗ Background: NOT RUNNING${COLORS[RESET]}"
-        fi
-    else
-        echo -e "${COLORS[RED]}✗ Project: NOT INSTALLED${COLORS[RESET]}"
-    fi
-}
-
-view_background_logs() {
-    if [[ ! -f "$BG_LOG_FILE" ]]; then
-        log "WARN" "No background log file found"
-        safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-        return
-    fi
-
-    echo -e "${COLORS[CYAN]}Background Logs (last 20 lines):${COLORS[RESET]}"
-    echo "=================================================="
-    tail -20 "$BG_LOG_FILE" 2>/dev/null || echo "No logs available"
-    echo
-    safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-}
-
-uninstall_project() {
-    safe_read "$(echo -e "${COLORS[RED]}Really uninstall? [y/N]: ${COLORS[RESET]}")" 10 "N"
-
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        stop_project_background
-        log "INFO" "Uninstalling..."
-        sudo rm -rf "$PROJECT_DIR" 2>/dev/null || true
-        rm -f "$PID_FILE" "$BG_LOG_FILE" 2>/dev/null || true
-        log "SUCCESS" "Project uninstalled"
-    else
-        log "INFO" "Uninstall cancelled"
-    fi
-
-    safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-}
-
-# =================================================================
-# ENTRY POINT
-# =================================================================
-
-main() {
-    # Initialize
-    touch "$LOG_FILE" "$BG_LOG_FILE" 2>/dev/null || true
-    log "INFO" "Installer started"
-
-    # Ensure we can handle signals properly
-    setup_traps
-
-    # Check if we have required permissions
-    if ! touch /tmp/test_write 2>/dev/null; then
-        echo -e "${COLORS[RED]}ERROR: Cannot write to /tmp directory${COLORS[RESET]}"
-        exit 1
-    fi
-    rm -f /tmp/test_write 2>/dev/null || true
-
-    # Run main menu
-    show_menu
-
-    # Clean exit message
-    echo -e "${COLORS[MAGENTA]}Thank you for using the installer!${COLORS[RESET]}"
-    if is_project_running; then
-        echo -e "${COLORS[GREEN]}Background processes are still running and will continue.${COLORS[RESET]}"
-    fi
-    log "INFO" "Installer finished"
-}
-
-# Run the script
-main "$@"
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\nSetup cancelled by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n✗ Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
