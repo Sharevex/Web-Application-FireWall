@@ -1,0 +1,35 @@
+import pyodbc
+import hashlib
+import base64
+import traceback
+
+# Trusted Connection for Windows Auth (trustedauth)
+MSSQL_CONN = (
+    'DRIVER={ODBC Driver 17 for SQL Server};'
+    'SERVER=localhost;DATABASE=admin;Trusted_Connection=yes;'
+)
+
+def hash_password(password):
+    digest = hashlib.sha256(password.encode('utf-8')).digest()
+    return base64.b64encode(digest).decode('utf-8')
+
+def get_user(username):
+    try:
+        conn = pyodbc.connect(MSSQL_CONN)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT username, password_hash FROM users WHERE username = ?",
+            (username,)
+        )
+        user = cursor.fetchone()
+        conn.close()
+        return user if user else None
+    except Exception:
+        print("DB error in get_user:\n", traceback.format_exc())
+        return None
+
+def verify_user(username, password):
+    user = get_user(username)
+    if not user:
+        return False
+    return hash_password(password) == user[1]
