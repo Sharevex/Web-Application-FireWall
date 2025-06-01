@@ -630,6 +630,11 @@ def metrics():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     
+    client_ip = request.remote_addr or "unknown"
+    if is_ip_blocked(client_ip):
+        return jsonify({"status": "blocked", "reason": "IP blacklisted"}), 403
+    
+    error = None
     if request.method == 'POST':
         username = request.form.get('username', '')
         password = request.form.get('password', '')
