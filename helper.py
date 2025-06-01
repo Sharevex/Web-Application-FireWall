@@ -2,328 +2,219 @@
 """
 helper.py - Database setup script for admin database
 Identifies OS, installs MySQL if needed, and creates database with users table
-Handles auth_socket authentication issue
+Handles auth_socket authentication issue and auto-secures root with root:root
 """
 
 import platform
 import sys
-import getpass
 import subprocess
-import time
 import os
 import hashlib
 
 def identify_os():
     """Identify the operating system"""
     system = platform.system().lower()
-    
     if system == 'linux':
-        # Check if it's Ubuntu specifically
         try:
             with open('/etc/os-release', 'r') as f:
                 content = f.read().lower()
                 if 'ubuntu' in content:
                     return 'ubuntu'
-                else:
-                    return 'linux'
+                return 'linux'
         except FileNotFoundError:
             return 'linux'
-    elif system == 'darwin':
+    if system == 'darwin':
         return 'mac'
-    elif system == 'windows':
+    if system == 'windows':
         return 'windows'
-    else:
-        return 'unknown'
+    return 'unknown'
 
 def run_command(command, use_sudo=False, input_text=None):
     """Run a system command"""
     if use_sudo and os.geteuid() != 0:
         command = f"sudo {command}"
-    
     try:
         print(f"Running: {command}")
-        if input_text:
-            process = subprocess.Popen(
-                command, 
-                shell=True, 
-                stdin=subprocess.PIPE, 
-                stdout=subprocess.PIPE, 
+        if input_text is not None:
+            proc = subprocess.Popen(
+                command, shell=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True
             )
-            stdout, stderr = process.communicate(input=input_text)
+            out, err = proc.communicate(input=input_text)
+            code = proc.returncode
         else:
-            process = subprocess.run(
-                command, 
-                shell=True, 
-                capture_output=True, 
-                text=True, 
-                check=False
+            proc = subprocess.run(
+                command, shell=True,
+                capture_output=True, text=True
             )
-            stdout = process.stdout
-            stderr = process.stderr
-        
-        if process.returncode == 0:
+            out, err, code = proc.stdout, proc.stderr, proc.returncode
+
+        if code == 0:
             print("✓ Command executed successfully")
-            if stdout:
-                print(f"Output: {stdout}")
-            return True, stdout
-        else:
-            print(f"✗ Command failed with return code {process.returncode}")
-            if stderr:
-                print(f"Error: {stderr}")
-            return False, stderr
+            if out:
+                print(f"Output: {out.strip()}")
+            return True, out
+        print(f"✗ Command failed (code {code})")
+        if err:
+            print(f"Error: {err.strip()}")
+        return False, err
     except Exception as e:
-        print(f"✗ Exception running command: {e}")
+        print(f"✗ Exception: {e}")
         return False, str(e)
 
 def install_mysql_connector():
     """Install mysql-connector-python"""
     print("Installing mysql-connector-python...")
-    success, output = run_command("pip3 install mysql-connector-python")
-    if not success:
-        success, output = run_command("pip install mysql-connector-python")
-    return success
+    ok, _ = run_command("pip3 install mysql-connector-python")
+    if not ok:
+        ok, _ = run_command("pip install mysql-connector-python")
+    return ok
 
 def install_mysql_ubuntu():
     """Install MySQL on Ubuntu"""
     print("Installing MySQL Server on Ubuntu...")
-    
-    # Update package list
-    success, _ = run_command("apt update", use_sudo=True)
-    if not success:
+    if not run_command("apt update", use_sudo=True)[0]:
         return False
-    
-    # Set non-interactive mode for MySQL installation
     os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
-    
-    # Install MySQL server
-    success, _ = run_command("apt install -y mysql-server", use_sudo=True)
-    if not success:
+    if not run_command("apt install -y mysql-server", use_sudo=True)[0]:
         return False
-    
-    # Start MySQL service
-    success, _ = run_command("systemctl start mysql", use_sudo=True)
-    if not success:
+    if not run_command("systemctl start mysql", use_sudo=True)[0]:
         return False
-    
-    # Enable MySQL to start on boot
-    success, _ = run_command("systemctl enable mysql", use_sudo=True)
-    if not success:
-        print("Warning: Could not enable MySQL to start on boot")
-    
-    print("✓ MySQL installed and started successfully")
+    ok, _ = run_command("systemctl enable mysql", use_sudo=True)
+    if not ok:
+        print("Warning: Could not enable MySQL on boot")
+    print("✓ MySQL installed and started")
     return True
 
 def fix_mysql_auth_and_secure():
     """Automatically secure MySQL with root:root credentials"""
     print("Configuring MySQL authentication and security...")
-    
-    # Set default credentials
     root_password = "root"
-    confirm_password = "root"
-    
-    # Create SQL commands to fix authentication and secure MySQL
-    sql_commands = f"""
--- Fix root authentication
+
+    sql = f"""
 ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{root_password}';
-SET GLOBAL validate_password.policy = STRONG;
-
--- Remove anonymous users
 DELETE FROM mysql.user WHERE User='';
-
--- Remove remote root login
-DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
-
--- Remove test database
+DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost','127.0.0.1','::1');
 DROP DATABASE IF EXISTS test;
 DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
-
--- Default security settings
-SET GLOBAL validate_password.policy = STRONG;
-SET GLOBAL validate_password.length = 12;
-
--- Flush privileges
 FLUSH PRIVILEGES;
-
--- Show that we're done
-SELECT 'MySQL secured successfully with root:root credentials' as Status;
+SELECT 'MySQL secured with root:root' AS Status;
 """
-    
-    # Write SQL commands to a temporary file
-    temp_sql_file = '/tmp/mysql_secure.sql'
+    tmp = '/tmp/mysql_secure.sql'
     try:
-        with open(temp_sql_file, 'w') as f:
-            f.write(sql_commands)
-        
-        # Execute the SQL commands using sudo mysql
-        success, output = run_command(f"mysql < {temp_sql_file}", use_sudo=True)
-        
-        # Clean up temp file
-        os.remove(temp_sql_file)
-        
-        if success:
-            print("✓ MySQL set up with default credentials (root:root)")
+        with open(tmp, 'w') as f:
+            f.write(sql)
+        ok, _ = run_command(f"mysql < {tmp}", use_sudo=True)
+        os.remove(tmp)
+        if ok:
+            print("✓ MySQL root password set to root")
             return root_password
-        else:
-            print("✗ Failed to secure MySQL")
-            return None
-            
+        print("✗ Failed to secure MySQL")
+        return None
     except Exception as e:
-        print(f"✗ Error securing MySQL: {e}")
-        if os.path.exists(temp_sql_file):
-            os.remove(temp_sql_file)
+        print(f"✗ Error: {e}")
+        if os.path.exists(tmp):
+            os.remove(tmp)
         return None
 
-def hash_password(password):
-    """Hash password using SHA-256"""
-    return hashlib.sha256(password.encode()).hexdigest()
+def hash_password(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
 
 def get_user_credentials():
     """Get username and password for the new user"""
-    print("\nCreate New User Account")
-    print("-" * 25)
-    username = input("Enter username: ").strip()
-    while not username:
+    print("\nCreate New User Account\n" + "-"*25)
+    uname = input("Enter username: ").strip()
+    while not uname:
         print("Username cannot be empty!")
-        username = input("Enter username: ").strip()
-    
-    password = getpass.getpass("Enter password: ")
-    while not password:
+        uname = input("Enter username: ").strip()
+    import getpass
+    pw = getpass.getpass("Enter password: ")
+    while not pw:
         print("Password cannot be empty!")
-        password = getpass.getpass("Enter password: ")
-    
-    confirm_password = getpass.getpass("Confirm password: ")
-    while password != confirm_password:
+        pw = getpass.getpass("Enter password: ")
+    confirm = getpass.getpass("Confirm password: ")
+    while pw != confirm:
         print("Passwords don't match!")
-        password = getpass.getpass("Enter password: ")
-        confirm_password = getpass.getpass("Confirm password: ")
-    
-    return username, password
+        pw = getpass.getpass("Enter password: ")
+        confirm = getpass.getpass("Confirm password: ")
+    return uname, pw
 
-def create_database_and_user_with_sudo(username, user_password):
-    """Create database and user using sudo mysql (for auth_socket)"""
-    print("Creating database and user using sudo mysql...")
-    
-    # Hash the password
-    password_hash = hash_password(user_password)
-    
-    # Create SQL commands
-    sql_commands = f"""
--- Create database
+def create_db_user_sudo(uname, upw):
+    print("Creating database and user via sudo mysql...")
+    ph = hash_password(upw)
+    sql = f"""
 CREATE DATABASE IF NOT EXISTS admin;
-
--- Use the admin database
 USE admin;
-
--- Create users table
 CREATE TABLE IF NOT EXISTS users (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    username VARCHAR(50) UNIQUE NOT NULL,
-    password_hash VARCHAR(64) NOT NULL,
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(50) UNIQUE NOT NULL,
+  password_hash VARCHAR(64) NOT NULL,
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
-
--- Insert user
-INSERT INTO users (username, password_hash, is_active) 
-VALUES ('{username}', '{password_hash}', TRUE);
-
--- Show success
-SELECT 'Database and user created successfully' as Status;
-SELECT * FROM users WHERE username = '{username}';
+INSERT INTO users (username,password_hash,is_active)
+VALUES ('{uname}','{ph}',TRUE);
+SELECT 'Done' AS Status;
 """
-    
-    # Write SQL commands to a temporary file
-    temp_sql_file = '/tmp/create_db_user.sql'
+    tmp = '/tmp/create_db_user.sql'
     try:
-        with open(temp_sql_file, 'w') as f:
-            f.write(sql_commands)
-        
-        # Execute the SQL commands using sudo mysql
-        success, output = run_command(f"mysql < {temp_sql_file}", use_sudo=True)
-        
-        # Clean up temp file
-        os.remove(temp_sql_file)
-        
-        if success:
-            print("✓ Database 'admin' created successfully")
-            print("✓ Table 'users' created successfully")
-            print(f"✓ User '{username}' created successfully")
+        with open(tmp, 'w') as f:
+            f.write(sql)
+        ok, _ = run_command(f"mysql < {tmp}", use_sudo=True)
+        os.remove(tmp)
+        if ok:
+            print("✓ admin DB and user table created")
+            print(f"✓ User '{uname}' inserted")
             return True
-        else:
-            print("✗ Failed to create database and user")
-            return False
-            
+        print("✗ Failed to create DB/user")
+        return False
     except Exception as e:
-        print(f"✗ Error creating database and user: {e}")
-        # Clean up temp file if it exists
-        if os.path.exists(temp_sql_file):
-            os.remove(temp_sql_file)
+        print(f"✗ Error: {e}")
+        if os.path.exists(tmp):
+            os.remove(tmp)
         return False
 
-def create_database_and_user_with_password(mysql_password, username, user_password):
-    """Create database and user using password authentication"""
+def create_db_user_pw(root_pw, uname, upw):
     try:
         import mysql.connector
-        
-        # Connect to MySQL
-        connection = mysql.connector.connect(
-            host='localhost',
-            user='root',
-            password=mysql_password,
-            auth_plugin='mysql_native_password'
+        conn = mysql.connector.connect(
+            host='localhost', user='root',
+            password=root_pw, auth_plugin='mysql_native_password'
         )
-        
-        cursor = connection.cursor()
-        
-        # Create database
-        cursor.execute("CREATE DATABASE IF NOT EXISTS admin")
-        print("✓ Database 'admin' created successfully")
-        
-        # Use the admin database
-        cursor.execute("USE admin")
-        
-        # Create users table
-        create_table_query = """
-        CREATE TABLE IF NOT EXISTS users (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(50) UNIQUE NOT NULL,
-            password_hash VARCHAR(64) NOT NULL,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        cur = conn.cursor()
+        cur.execute("CREATE DATABASE IF NOT EXISTS admin")
+        print("✓ admin DB created")
+        cur.execute("USE admin")
+        cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(50) UNIQUE NOT NULL,
+  password_hash VARCHAR(64) NOT NULL,
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+)""")
+        print("✓ users table created")
+        ph = hash_password(upw)
+        cur.execute(
+            "INSERT INTO users (username,password_hash,is_active) VALUES (%s,%s,%s)",
+            (uname, ph, True)
         )
-        """
-        
-        cursor.execute(create_table_query)
-        print("✓ Table 'users' created successfully")
-        
-        # Hash the password and insert user
-        password_hash = hash_password(user_password)
-        insert_query = """
-        INSERT INTO users (username, password_hash, is_active) 
-        VALUES (%s, %s, %s)
-        """
-        
-        cursor.execute(insert_query, (username, password_hash, True))
-        connection.commit()
-        
-        print(f"✓ User '{username}' created successfully")
-        
-        cursor.close()
-        connection.close()
-        
+        conn.commit()
+        print(f"✓ User '{uname}' created")
+        cur.close()
+        conn.close()
         return True
-        
     except mysql.connector.IntegrityError as e:
-        if "Duplicate entry" in str(e):
-            print(f"✗ Error: Username '{username}' already exists")
+        if "Duplicate" in str(e):
+            print(f"✗ Username '{uname}' exists")
         else:
-            print(f"✗ Integrity Error: {e}")
+            print(f"✗ IntegrityError: {e}")
         return False
-    
     except Exception as e:
         print(f"✗ Error: {e}")
         return False
@@ -331,122 +222,92 @@ def create_database_and_user_with_password(mysql_password, username, user_passwo
 def test_mysql_connection():
     """Test MySQL connection methods"""
     print("Testing MySQL connection methods...")
-    
-    # Method 1: Try connecting with no password (fresh install)
     try:
         import mysql.connector
-        connection = mysql.connector.connect(
-            host='localhost',
-            user='root',
-            password='',
-            connect_timeout=5
+        conn = mysql.connector.connect(
+            host='localhost', user='root', password='', connect_timeout=5
         )
-        connection.close()
-        print("✓ MySQL accessible with no password")
+        conn.close()
+        print("✓ No-password access")
         return 'no_password', ''
-    except mysql.connector.Error:
+    except:
         pass
-    
-    # Method 2: Check if we can use sudo mysql (auth_socket)
     try:
-        result = subprocess.run(
-            ['sudo', 'mysql', '-e', 'SELECT 1;'],
-            capture_output=True,
-            text=True,
-            timeout=10
+        res = subprocess.run(
+            ['sudo','mysql','-e','SELECT 1;'],
+            capture_output=True, text=True, timeout=10
         )
-        if result.returncode == 0:
-            print("✓ MySQL accessible via sudo (auth_socket)")
+        if res.returncode == 0:
+            print("✓ Auth_socket access")
             return 'auth_socket', None
     except:
         pass
-    
-    # Method 3: Need password
-    print("MySQL requires password authentication")
+    print("Password auth required")
     return 'password_required', None
 
 def main():
-    """Main function"""
-    print("=" * 60)
+    print("="*60)
     print("MySQL Database Setup Script with Auth Fix")
-    print("=" * 60)
-    
-    # Check if running as root for installation
+    print("="*60)
     if os.geteuid() != 0:
-        print("Note: This script may need sudo privileges for MySQL operations")
-    
-    # Identify OS
+        print("Note: sudo may be required for some operations")
+
     os_type = identify_os()
     print(f"Detected OS: {os_type.upper()}")
-    
-    # Install mysql-connector-python if not available
+
     try:
         import mysql.connector
-        print("✓ mysql-connector-python is available")
+        print("✓ mysql-connector-python available")
     except ImportError:
-        print("Installing mysql-connector-python...")
         if not install_mysql_connector():
-            print("✗ Failed to install mysql-connector-python")
+            print("✗ Could not install connector")
             sys.exit(1)
-        # Re-import after installation
         import mysql.connector
-    
-    # Test MySQL connection
-    connection_type, mysql_password = test_mysql_connection()
-    
-    if connection_type == 'no_password':
-        print("Fresh MySQL installation detected")
-        # Automatically secure MySQL with default credentials
-        mysql_password = fix_mysql_auth_and_secure()
-        if mysql_password is None:
-            print("✗ Failed to secure MySQL")
+
+    conn_type, root_pw = test_mysql_connection()
+
+    if conn_type == 'no_password':
+        print("Fresh install detected → securing with root:root")
+        root_pw = fix_mysql_auth_and_secure()
+        if not root_pw:
             sys.exit(1)
-        connection_type = 'password'
-    
-    elif connection_type == 'auth_socket':
-        print("MySQL using auth_socket authentication")
-        # Secure with default credentials
-        mysql_password = fix_mysql_auth_and_secure()
-        if mysql_password is None:
-            print("✗ Failed to secure MySQL with default credentials")
+        conn_type = 'password'
+    elif conn_type == 'auth_socket':
+        print("Auth_socket detected → securing with root:root")
+        root_pw = fix_mysql_auth_and_secure()
+        if not root_pw:
             sys.exit(1)
-        connection_type = 'password'
-    
-    elif connection_type == 'password_required':
-        # Use default credentials as root already has password
-        mysql_password = "root"
-    
-    # Get user credentials
-    username, user_password = get_user_credentials()
-    
-    # Create database and user based on connection type
-    success = False
-    
-    if connection_type == 'sudo_mysql':
-        success = create_database_and_user_with_sudo(username, user_password)
-    elif connection_type == 'password':
-        success = create_database_and_user_with_password(mysql_password, username, user_password)
-    
+        conn_type = 'password'
+    elif conn_type == 'password_required':
+        print("Using default root:root credentials")
+        root_pw = "root"
+        conn_type = 'password'
+
+    uname, upw = get_user_credentials()
+
+    if conn_type == 'password':
+        success = create_db_user_pw(root_pw, uname, upw)
+    else:
+        success = create_db_user_sudo(uname, upw)
+
     if success:
-        print("\n" + "=" * 60)
+        print("\n" + "="*60)
         print("Setup completed successfully!")
-        print("=" * 60)
+        print("="*60)
         print(f"Database: admin")
         print(f"Table: users")
-        print(f"User created: {username}")
-        print(f"User is_active: True")
-        
-        if connection_type == 'password':
-            print(f"\nYou can now connect to MySQL ! :D")
+        print(f"User: {uname} (active)")
+        if conn_type == 'password':
+            print("\nYou can now connect with: mysql -u root -proot")
     else:
-        print("\n✗ Failed to complete setup")
+        print("\n✗ Setup failed")
         sys.exit(1)
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\nSetup cancelled by user")
+        print("\n\nSetup cancelled")
         sys.exit(1)
     except Exception as e:
         print(f"\n✗ Unexpected error: {e}")
