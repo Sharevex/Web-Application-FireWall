@@ -44,7 +44,7 @@ def check_port_open(host='localhost', port=3306, timeout=5):
     except Exception:
         return False
 
-def run_command(command, use_sudo=False, input_text=None, timeout=30):
+def run_command(command, use_sudo=False, input_text=None, timeout=300):
     """Run a system command with better error handling"""
     if use_sudo and os.geteuid() != 0:
         command = f"sudo {command}"
