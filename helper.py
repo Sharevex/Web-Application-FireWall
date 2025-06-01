@@ -137,7 +137,7 @@ def install_mysql_ubuntu():
     os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
     
     # Install MySQL server
-    if not run_command("apt install -y mysql-server", use_sudo=True)[0]:
+    if not run_command("DEBIAN_FRONTEND=noninteractive apt install -y mysql-server", use_sudo=True, timeout=300)[0]:
         print("✗ Failed to install MySQL server")
         return False
     
