@@ -33,6 +33,7 @@ readonly HELPER_PID_FILE="/tmp/waf_helper.pid"
 readonly BG_LOG_FILE="/tmp/waf_background.log"
 readonly HELPER_LOG_FILE="/tmp/waf_helper.log"
 readonly VENV_DIR="$PROJECT_DIR/venv"
+readonly MYSQL_CONFIG_FILE="/tmp/waf_mysql_config.env"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -41,6 +42,13 @@ INTERRUPTIBLE=true
 NORMAL_EXIT=false
 FORCE_CLEANUP=false
 HELPER_RUNNING=false
+
+# MySQL configuration variables - Updated for correct schema
+MYSQL_ROOT_PASSWORD=""
+MYSQL_DATABASE_NAME="admin"  # Fixed database name
+MYSQL_USERNAME="waf_user"
+MYSQL_USER_PASSWORD=""
+MYSQL_CONFIGURED=false
 
 # =================================================================
 # LOGGING FUNCTIONS
@@ -85,9 +93,371 @@ safe_read() {
     fi
 }
 
+# Fixed secure password reading function
+safe_read_password() {
+    local prompt="$1"
+    local timeout="${2:-60}"
+    local password=""
+    
+    echo -n "$prompt"
+    
+    # Save current terminal settings
+    local old_settings=$(stty -g)
+    
+    # Turn off echo but keep canonical mode for proper Enter handling
+    stty -echo
+    
+    # Use a simpler approach with built-in read timeout
+    if read -t "$timeout" -s password 2>/dev/null; then
+        # Successfully read password
+        true
+    else
+        # Timeout occurred
+        echo -e "\n${COLORS[YELLOW]}Timeout reached - using empty password${COLORS[RESET]}"
+        password=""
+    fi
+    
+    # Restore terminal settings
+    stty "$old_settings"
+    echo
+    
+    REPLY="$password"
+}
+
+# =================================================================
+# SIGNAL HANDLERS & CLEANUP
+# =================================================================
+
+cleanup() {
+    local exit_code=$?
+    
+    if [[ "$NORMAL_EXIT" == "true" ]]; then
+        log "INFO" "Normal exit - performing standard cleanup"
+    else
+        log "WARN" "Unexpected exit (code: $exit_code) - performing emergency cleanup"
+    fi
+    
+    # Stop helper.py if running
+    if [[ "$HELPER_RUNNING" == "true" ]] && [[ -f "$HELPER_PID_FILE" ]]; then
+        local helper_pid=$(cat "$HELPER_PID_FILE" 2>/dev/null || echo "")
+        if [[ -n "$helper_pid" ]] && kill -0 "$helper_pid" 2>/dev/null; then
+            log "INFO" "Stopping helper.py (PID: $helper_pid)"
+            kill -TERM "$helper_pid" 2>/dev/null || true
+            sleep 2
+            if kill -0 "$helper_pid" 2>/dev/null; then
+                kill -KILL "$helper_pid" 2>/dev/null || true
+            fi
+        fi
+        rm -f "$HELPER_PID_FILE"
+    fi
+    
+    # Clean up other processes
+    if [[ -f "$PID_FILE" ]]; then
+        local main_pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+        if [[ -n "$main_pid" ]] && kill -0 "$main_pid" 2>/dev/null; then
+            log "INFO" "Stopping main process (PID: $main_pid)"
+            kill -TERM "$main_pid" 2>/dev/null || true
+        fi
+        rm -f "$PID_FILE"
+    fi
+    
+    # Reset terminal if needed
+    stty sane 2>/dev/null || true
+    
+    if [[ "$NORMAL_EXIT" != "true" ]]; then
+        echo -e "\n${COLORS[YELLOW]}Installation interrupted or failed${COLORS[RESET]}"
+        echo -e "${COLORS[CYAN]}Check logs at: $LOG_FILE${COLORS[RESET]}"
+    fi
+    
+    exit $exit_code
+}
+
+interrupt_handler() {
+    if [[ "$INTERRUPTIBLE" == "true" ]]; then
+        log "WARN" "Installation interrupted by user"
+        echo -e "\n${COLORS[YELLOW]}Installation interrupted by user${COLORS[RESET]}"
+        NORMAL_EXIT=false
+        cleanup
+    else
+        log "WARN" "Interrupt signal received but ignored (critical section)"
+        echo -e "\n${COLORS[YELLOW]}Interrupt received but ignored - in critical section${COLORS[RESET]}"
+    fi
+}
+
+# Set up signal handlers
+trap interrupt_handler SIGINT SIGTERM
+trap cleanup EXIT
+
+# =================================================================
+# SYSTEM CHECKS & PREREQUISITES
+# =================================================================
+
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${COLORS[RED]}This script must be run as root${COLORS[RESET]}"
+        echo -e "${COLORS[CYAN]}Please run: sudo $0${COLORS[RESET]}"
+        exit 1
+    fi
+}
+
+check_system() {
+    log "INFO" "Performing system compatibility checks..."
+    echo -e "${COLORS[CYAN]}Checking system compatibility...${COLORS[RESET]}"
+    
+    # Check OS
+    if ! grep -q "Ubuntu\|Debian" /etc/os-release 2>/dev/null; then
+        echo -e "${COLORS[RED]}This installer is designed for Ubuntu/Debian systems${COLORS[RESET]}"
+        exit 1
+    fi
+    
+    # Check available space (minimum 2GB)
+    local available_space=$(df / | awk 'NR==2 {print $4}')
+    if [[ $available_space -lt 2097152 ]]; then
+        echo -e "${COLORS[RED]}Insufficient disk space. At least 2GB required${COLORS[RESET]}"
+        exit 1
+    fi
+    
+    # Check internet connectivity
+    if ! ping -c 1 google.com &>/dev/null; then
+        echo -e "${COLORS[RED]}No internet connection detected${COLORS[RESET]}"
+        exit 1
+    fi
+    
+    log "SUCCESS" "System compatibility checks passed"
+    echo -e "${COLORS[GREEN]}✓ System compatibility checks passed${COLORS[RESET]}"
+}
+
+# =================================================================
+# MYSQL CONFIGURATION FUNCTIONS
+# =================================================================
+
+create_mysql_config_file() {
+    local mysql_password="$1"
+    
+    log "INFO" "Creating MySQL configuration file for helper.py"
+    
+    cat > "$MYSQL_CONFIG_FILE" << EOF
+# MySQL Configuration for WAF Helper
+MYSQL_ROOT_PASSWORD=${mysql_password}
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_DATABASE=${MYSQL_DATABASE_NAME}
+MYSQL_USER=${MYSQL_USERNAME}
+MYSQL_USER_PASSWORD=${MYSQL_USER_PASSWORD}
+EOF
+    
+    chmod 600 "$MYSQL_CONFIG_FILE"
+    log "SUCCESS" "MySQL configuration file created: $MYSQL_CONFIG_FILE"
+}
+
+configure_mysql_credentials() {
+    log "INFO" "Configuring MySQL credentials..."
+    echo -e "${COLORS[CYAN]}=== MySQL Configuration ===${COLORS[RESET]}"
+    echo -e "${COLORS[YELLOW]}Setting up MySQL for WAF database (admin) with user table...${COLORS[RESET]}"
+    
+    local attempts=0
+    local max_attempts=3
+    
+    while [[ $attempts -lt $max_attempts ]]; do
+        echo -e "${COLORS[CYAN]}Please enter the MySQL root password:${COLORS[RESET]}"
+        echo -e "${COLORS[DIM]}(Leave empty if no password is set, or press Ctrl+C to skip MySQL setup)${COLORS[RESET]}"
+        
+        if safe_read_password "MySQL root password: " 60; then
+            MYSQL_ROOT_PASSWORD="$REPLY"
+            
+            # Test the MySQL connection
+            if test_mysql_connection; then
+                log "SUCCESS" "MySQL connection successful"
+                echo -e "${COLORS[GREEN]}✓ MySQL connection verified${COLORS[RESET]}"
+                MYSQL_CONFIGURED=true
+                
+                # Get WAF user password
+                get_waf_user_password
+                
+                # Create configuration file for helper.py
+                create_mysql_config_file "$MYSQL_ROOT_PASSWORD"
+                
+                return 0
+            else
+                log "WARN" "MySQL connection failed with provided credentials"
+                echo -e "${COLORS[RED]}✗ Failed to connect to MySQL with provided credentials${COLORS[RESET]}"
+                
+                ((attempts++))
+                if [[ $attempts -lt $max_attempts ]]; then
+                    echo -e "${COLORS[YELLOW]}Please try again (Attempt $((attempts + 1))/$max_attempts)${COLORS[RESET]}"
+                    sleep 2
+                fi
+            fi
+        else
+            # Timeout or interrupt
+            echo -e "${COLORS[YELLOW]}Skipping MySQL configuration...${COLORS[RESET]}"
+            log "WARN" "MySQL configuration skipped by user"
+            return 1
+        fi
+    done
+    
+    echo -e "${COLORS[RED]}Failed to configure MySQL after $max_attempts attempts${COLORS[RESET]}"
+    echo -e "${COLORS[YELLOW]}You can configure MySQL manually later or skip it for now${COLORS[RESET]}"
+    
+    safe_read "Continue without MySQL configuration? [y/N]: " 30 "n"
+    if [[ "${REPLY,,}" == "y" ]]; then
+        log "WARN" "Continuing without MySQL configuration"
+        return 0
+    else
+        log "ERROR" "Installation aborted due to MySQL configuration failure"
+        return 1
+    fi
+}
+
+get_waf_user_password() {
+    echo -e "${COLORS[CYAN]}WAF Database User Configuration:${COLORS[RESET]}"
+    echo -e "${COLORS[DIM]}Database: admin, User: $MYSQL_USERNAME${COLORS[RESET]}"
+    
+    # Get user password
+    safe_read_password "Enter password for MySQL user '$MYSQL_USERNAME': " 60
+    MYSQL_USER_PASSWORD="$REPLY"
+    
+    # Use default password if empty
+    if [[ -z "$MYSQL_USER_PASSWORD" ]]; then
+        MYSQL_USER_PASSWORD="waf_password_$(date +%s)"
+        echo -e "${COLORS[YELLOW]}Using auto-generated password for security${COLORS[RESET]}"
+    fi
+    
+    log "INFO" "MySQL user configuration: DB=$MYSQL_DATABASE_NAME, USER=$MYSQL_USERNAME"
+}
+
+test_mysql_connection() {
+    log "INFO" "Testing MySQL connection..."
+    
+    local mysql_cmd="mysql -u root"
+    
+    # Add password parameter if password is not empty
+    if [[ -n "$MYSQL_ROOT_PASSWORD" ]]; then
+        mysql_cmd="mysql -u root -p${MYSQL_ROOT_PASSWORD}"
+    fi
+    
+    # Test connection by running a simple query
+    if echo "SELECT 1;" | $mysql_cmd --silent --batch 2>/dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# =================================================================
+# MYSQL INSTALLATION & SETUP
+# =================================================================
+
+install_mysql() {
+    log "INFO" "Installing MySQL server..."
+    echo -e "${COLORS[CYAN]}Installing MySQL server...${COLORS[RESET]}"
+    
+    # Update package list
+    apt-get update -qq || {
+        log "ERROR" "Failed to update package list"
+        return 1
+    }
+    
+    # Install MySQL server
+    apt-get install -y mysql-server mysql-client || {
+        log "ERROR" "Failed to install MySQL server"
+        return 1
+    }
+    
+    # Start and enable MySQL service
+    systemctl start mysql || {
+        log "ERROR" "Failed to start MySQL service"
+        return 1
+    }
+    
+    systemctl enable mysql || {
+        log "WARN" "Failed to enable MySQL service"
+    }
+    
+    log "SUCCESS" "MySQL server installed successfully"
+    echo -e "${COLORS[GREEN]}✓ MySQL server installed successfully${COLORS[RESET]}"
+    return 0
+}
+
+setup_mysql_database() {
+    if [[ "$MYSQL_CONFIGURED" != "true" ]]; then
+        log "WARN" "MySQL not configured, skipping database setup"
+        echo -e "${COLORS[YELLOW]}Skipping MySQL database setup...${COLORS[RESET]}"
+        return 0
+    fi
+    
+    log "INFO" "Setting up WAF database with correct schema..."
+    echo -e "${COLORS[CYAN]}Setting up WAF database (admin) with user table...${COLORS[RESET]}"
+    
+    local mysql_cmd="mysql -u root"
+    
+    # Add password parameter if password is not empty
+    if [[ -n "$MYSQL_ROOT_PASSWORD" ]]; then
+        mysql_cmd="mysql -u root -p${MYSQL_ROOT_PASSWORD}"
+    fi
+    
+    # Create database, user, and table with correct schema
+    local sql_commands="
+-- Create the admin database
+CREATE DATABASE IF NOT EXISTS \`admin\`;
+
+-- Create WAF user
+CREATE USER IF NOT EXISTS '${MYSQL_USERNAME}'@'localhost' IDENTIFIED BY '${MYSQL_USER_PASSWORD}';
+
+-- Grant privileges on admin database
+GRANT ALL PRIVILEGES ON \`admin\`.* TO '${MYSQL_USERNAME}'@'localhost';
+
+-- Use the admin database
+USE \`admin\`;
+
+-- Create the user table with correct schema
+CREATE TABLE IF NOT EXISTS \`user\` (
+    \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+    \`username\` VARCHAR(255) NOT NULL UNIQUE,
+    \`password_hash\` VARCHAR(255) NOT NULL,
+    \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- Create index on username for faster lookups
+CREATE INDEX IF NOT EXISTS \`idx_username\` ON \`user\` (\`username\`);
+
+-- Insert a default admin user (password: admin123 - change this!)
+INSERT IGNORE INTO \`user\` (\`username\`, \`password_hash\`) 
+VALUES ('admin', SHA2('admin123', 256));
+
+-- Flush privileges
+FLUSH PRIVILEGES;
+"
+    
+    if echo "$sql_commands" | $mysql_cmd --silent --batch 2>/dev/null; then
+        log "SUCCESS" "WAF database setup completed with correct schema"
+        echo -e "${COLORS[GREEN]}✓ WAF database setup completed${COLORS[RESET]}"
+        echo -e "${COLORS[CYAN]}Database: admin${COLORS[RESET]}"
+        echo -e "${COLORS[CYAN]}Table: user (columns: username, password_hash)${COLORS[RESET]}"
+        echo -e "${COLORS[YELLOW]}Default admin user created (username: admin, password: admin123)${COLORS[RESET]}"
+        echo -e "${COLORS[RED]}⚠️  IMPORTANT: Change the default admin password!${COLORS[RESET]}"
+        return 0
+    else
+        log "ERROR" "Failed to setup WAF database"
+        echo -e "${COLORS[RED]}✗ Failed to setup WAF database${COLORS[RESET]}"
+        return 1
+    fi
+}
+
 # =================================================================
 # PYTHON ENVIRONMENT MANAGEMENT
 # =================================================================
+
+get_python_executable() {
+    if command -v python3 >/dev/null; then
+        echo "python3"
+    elif command -v python >/dev/null; then
+        echo "python"
+    else
+        echo ""
+    fi
+}
 
 setup_python_environment() {
     log "INFO" "Setting up Python virtual environment..."
@@ -98,829 +468,785 @@ setup_python_environment() {
         return 1
     }
 
-    # Install python3-venv if not available
-    if ! python3 -m venv --help >/dev/null 2>&1; then
-        log "INFO" "Installing python3-venv package..."
-        echo -e "${COLORS[CYAN]}Installing python3-venv package...${COLORS[RESET]}"
-        apt-get update -qq
-        apt-get install -y python3-venv python3-full python3-pip || {
-            log "ERROR" "Failed to install python3-venv"
-            return 1
-        }
-    fi
+    # Always install python3-venv packages to ensure availability
+    log "INFO" "Installing python3-venv packages..."
+    echo -e "${COLORS[CYAN]}Installing python3-venv packages...${COLORS[RESET]}"
+    apt-get update -qq
+    apt-get install -y python3-venv python3.12-venv python3-full python3-pip || {
+        log "ERROR" "Failed to install python3-venv packages"
+        return 1
+    }
 
-    # Remove existing venv if present
+    # Remove existing virtual environment if it exists
     if [[ -d "$VENV_DIR" ]]; then
-        log "INFO" "Removing existing virtual environment"
+        log "INFO" "Removing existing virtual environment..."
         rm -rf "$VENV_DIR"
     fi
 
-    # Create virtual environment with timeout
+    # Create new virtual environment
     log "INFO" "Creating virtual environment..."
-    echo -e "${COLORS[CYAN]}Creating virtual environment...${COLORS[RESET]}"
-    if ! timeout 60s python3 -m venv "$VENV_DIR"; then
+    python3 -m venv "$VENV_DIR" || {
         log "ERROR" "Failed to create virtual environment"
         return 1
-    fi
+    }
 
-    # Activate and setup
+    # Activate virtual environment
     source "$VENV_DIR/bin/activate" || {
-        log "ERROR" "Cannot activate virtual environment"
+        log "ERROR" "Failed to activate virtual environment"
         return 1
     }
 
-    log "INFO" "Upgrading pip in virtual environment..."
-    echo -e "${COLORS[CYAN]}Upgrading pip...${COLORS[RESET]}"
-    python -m pip install --upgrade pip -q --timeout 30 || {
-        log "WARN" "Pip upgrade failed, continuing..."
+    # Upgrade pip
+    log "INFO" "Upgrading pip..."
+    pip install --upgrade pip || {
+        log "WARN" "Failed to upgrade pip"
     }
 
-    # Install requirements if available
+        # Install mysql-connector-python
+    log "INFO" "Installing mysql-connector-python..."
+    pip install mysql-connector-python || {
+        log "WARN" "Failed to install mysql-connector-python"
+    }
+
+
+    # Install requirements if requirements.txt exists
     if [[ -f "requirements.txt" ]]; then
-        log "INFO" "Installing project requirements..."
-        echo -e "${COLORS[CYAN]}Installing Python dependencies...${COLORS[RESET]}"
-        if ! pip install -r requirements.txt -q --timeout 120; then
-            log "WARN" "Some packages may have failed to install"
-            echo -e "${COLORS[YELLOW]}Warning: Some Python packages may have failed to install${COLORS[RESET]}"
-        fi
-    else
-        # Install common dependencies for web application firewalls
-        log "INFO" "Installing common dependencies..."
-        echo -e "${COLORS[CYAN]}Installing common dependencies...${COLORS[RESET]}"
-        pip install flask requests scapy netfilterqueue psutil -q --timeout 120 || {
-            log "WARN" "Some common dependencies failed to install"
+        log "INFO" "Installing Python requirements..."
+        echo -e "${COLORS[CYAN]}Installing Python requirements...${COLORS[RESET]}"
+        
+        pip install -r requirements.txt -v || {
+            log "ERROR" "Failed to install requirements"
+            echo -e "${COLORS[RED]}Failed to install Python requirements${COLORS[RESET]}"
+            return 1
         }
     fi
 
-    # Deactivate virtual environment for now
-    deactivate 2>/dev/null || true
 
-    log "SUCCESS" "Python environment setup completed"
+    log "SUCCESS" "Python virtual environment setup completed"
     echo -e "${COLORS[GREEN]}✓ Python virtual environment setup completed${COLORS[RESET]}"
-}
-
-get_python_executable() {
-    if [[ -f "$VENV_DIR/bin/python" ]]; then
-        echo "$VENV_DIR/bin/python"
-    else
-        echo "python3"
-    fi
-}
-
-# =================================================================
-# HELPER.PY MANAGEMENT FUNCTIONS
-# =================================================================
-
-# Check if helper.py exists and is executable
-check_helper_py() {
-    local helper_path="$PROJECT_DIR/helper.py"
-    
-    if [[ ! -f "$helper_path" ]]; then
-        log "WARN" "helper.py not found at $helper_path"
-        echo -e "${COLORS[YELLOW]}Warning: helper.py not found at $helper_path${COLORS[RESET]}"
-        return 1
-    fi
-    
-    if [[ ! -x "$helper_path" ]]; then
-        log "INFO" "Making helper.py executable"
-        echo -e "${COLORS[BLUE]}Making helper.py executable...${COLORS[RESET]}"
-        chmod +x "$helper_path" || {
-            log "ERROR" "Failed to make helper.py executable"
-            echo -e "${COLORS[RED]}Failed to make helper.py executable${COLORS[RESET]}"
-            return 1
-        }
-    fi
-    
-    return 0
-}
-
-# Start helper.py in background using virtual environment
-start_helper_background() {
-    local helper_path="$PROJECT_DIR/helper.py"
-    local python_exec=$(get_python_executable)
-    
-    log "INFO" "Starting helper.py in background"
-    echo -e "${COLORS[CYAN]}Starting helper.py in background...${COLORS[RESET]}"
-    
-    # Check if helper is already running
-    if [[ -f "$HELPER_PID_FILE" ]] && kill -0 "$(cat "$HELPER_PID_FILE")" 2>/dev/null; then
-        log "WARN" "Helper.py is already running (PID: $(cat "$HELPER_PID_FILE"))"
-        echo -e "${COLORS[YELLOW]}Helper.py is already running (PID: $(cat "$HELPER_PID_FILE"))${COLORS[RESET]}"
-        return 0
-    fi
-    
-    # Change to project directory
-    cd "$PROJECT_DIR" || return 1
-    
-    # Start helper.py in background using virtual environment python
-    nohup "$python_exec" "$helper_path" > "$HELPER_LOG_FILE" 2>&1 &
-    local helper_pid=$!
-    
-    # Save PID
-    echo "$helper_pid" > "$HELPER_PID_FILE"
-    HELPER_RUNNING=true
-    
-    # Wait a moment to check if it started successfully
-    sleep 2
-    
-    if kill -0 "$helper_pid" 2>/dev/null; then
-        log "SUCCESS" "Helper.py started successfully (PID: $helper_pid)"
-        echo -e "${COLORS[GREEN]}✓ Helper.py started successfully (PID: $helper_pid)${COLORS[RESET]}"
-        echo -e "${COLORS[DIM]}Helper log: $HELPER_LOG_FILE${COLORS[RESET]}"
-        return 0
-    else
-        log "ERROR" "Failed to start helper.py"
-        echo -e "${COLORS[RED]}✗ Failed to start helper.py${COLORS[RESET]}"
-        rm -f "$HELPER_PID_FILE"
-        HELPER_RUNNING=false
-        return 1
-    fi
-}
-
-# Stop helper.py
-stop_helper() {
-    if [[ -f "$HELPER_PID_FILE" ]]; then
-        local helper_pid=$(cat "$HELPER_PID_FILE")
-        if kill -0 "$helper_pid" 2>/dev/null; then
-            log "INFO" "Stopping helper.py (PID: $helper_pid)"
-            echo -e "${COLORS[YELLOW]}Stopping helper.py (PID: $helper_pid)...${COLORS[RESET]}"
-            kill "$helper_pid" 2>/dev/null || true
-            wait "$helper_pid" 2>/dev/null || true
-            echo -e "${COLORS[GREEN]}✓ Helper.py stopped${COLORS[RESET]}"
-        fi
-        rm -f "$HELPER_PID_FILE"
-    fi
-    HELPER_RUNNING=false
-}
-
-# Wait for helper.py to complete initialization (if needed)
-wait_for_helper_ready() {
-    local max_wait=30
-    local wait_count=0
-    
-    log "INFO" "Waiting for helper.py to initialize"
-    echo -e "${COLORS[BLUE]}Waiting for helper.py to initialize...${COLORS[RESET]}"
-    
-    while [[ $wait_count -lt $max_wait ]]; do
-        # Check if helper is still running
-        if [[ -f "$HELPER_PID_FILE" ]] && kill -0 "$(cat "$HELPER_PID_FILE")" 2>/dev/null; then
-            # You can add specific checks here for helper readiness
-            # For example, checking for a ready file or port
-            if [[ -f "$PROJECT_DIR/.helper_ready" ]] || grep -q "Helper ready\|ready\|initialized\|started" "$HELPER_LOG_FILE" 2>/dev/null; then
-                log "SUCCESS" "Helper.py is ready"
-                echo -e "${COLORS[GREEN]}✓ Helper.py is ready${COLORS[RESET]}"
-                return 0
-            fi
-        else
-            log "ERROR" "Helper.py stopped unexpectedly"
-            echo -e "${COLORS[RED]}✗ Helper.py stopped unexpectedly${COLORS[RESET]}"
-            return 1
-        fi
-        
-        sleep 1
-        ((wait_count++))
-        echo -n "."
-    done
-    
-    log "WARN" "Helper.py readiness timeout, proceeding anyway"
-    echo -e "\n${COLORS[YELLOW]}Warning: Helper.py readiness timeout, proceeding anyway...${COLORS[RESET]}"
     return 0
 }
 
 # =================================================================
-# UTILITY FUNCTIONS
+# PROJECT MANAGEMENT
 # =================================================================
 
-is_project_running() {
-    [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
-}
-
-is_helper_running() {
-    [[ -f "$HELPER_PID_FILE" ]] && kill -0 "$(cat "$HELPER_PID_FILE")" 2>/dev/null
-}
-
-# =================================================================
-# SIGNAL HANDLING - ENHANCED VERSION
-# =================================================================
-
-# Enhanced cleanup function
-cleanup_and_exit() {
-    # Don't cleanup if this is a normal menu exit
-    if [[ "$NORMAL_EXIT" == "true" ]]; then
-        return 0
-    fi
-
-    echo -e "\n${COLORS[YELLOW]}Cleaning up and exiting...${COLORS[RESET]}"
-
-    # Stop helper.py if running
-    if [[ "$HELPER_RUNNING" == "true" ]]; then
-        stop_helper
-    fi
-
-    # Only kill child processes if we were interrupted or explicitly asked to cleanup
-    if [[ "$FORCE_CLEANUP" == "true" ]]; then
-        local children=$(jobs -p 2>/dev/null || true)
-        if [[ -n "$children" ]]; then
-            echo "Stopping background jobs..."
-            kill $children 2>/dev/null || true
-            wait $children 2>/dev/null || true
-        fi
-        
-        # Stop main project if running
-        if [[ -f "$PID_FILE" ]]; then
-            local main_pid=$(cat "$PID_FILE")
-            if kill -0 "$main_pid" 2>/dev/null; then
-                echo "Stopping main project..."
-                kill "$main_pid" 2>/dev/null || true
-            fi
-            rm -f "$PID_FILE"
-        fi
-    fi
-
-    # Reset terminal
-    stty sane 2>/dev/null || true
-
-    echo -e "${COLORS[CYAN]}Log files:${COLORS[RESET]}"
-    echo -e "${COLORS[DIM]}  Main: $LOG_FILE${COLORS[RESET]}"
-    echo -e "${COLORS[DIM]}  Background: $BG_LOG_FILE${COLORS[RESET]}"
-    echo -e "${COLORS[DIM]}  Helper: $HELPER_LOG_FILE${COLORS[RESET]}"
-    exit 0
-}
-
-# Enhanced interrupt handler
-safe_interrupt_handler() {
-    if [[ "$INTERRUPTIBLE" == "true" ]]; then
-        echo -e "\n${COLORS[YELLOW]}=== Interrupted! ===${COLORS[RESET]}"
-        echo -e "${COLORS[CYAN]}Options:${COLORS[RESET]}"
-        echo -e "${COLORS[GREEN]}1) Start project in background (with helper.py) and return to menu${COLORS[RESET]}"
-        echo -e "${COLORS[BLUE]}2) Return to main menu${COLORS[RESET]}"
-        echo -e "${COLORS[RED]}3) Exit completely (preserves background processes)${COLORS[RESET]}"
-        echo -e "${COLORS[RED]}4) Exit and stop all processes (including helper.py)${COLORS[RESET]}"
-
-        # Use timeout to prevent hanging on read
-        echo -n "$(echo -e "${COLORS[YELLOW]}Choose [1-4] (auto-select 2 in 10s): ${COLORS[RESET]}")"
-
-        if read -t 10 -n 1 choice 2>/dev/null; then
-            echo
-        else
-            echo -e "\n${COLORS[DIM]}Timeout - returning to menu${COLORS[RESET]}"
-            choice="2"
-        fi
-
-        case "${choice:-2}" in
-        1)
-            echo -e "${COLORS[GREEN]}Starting project with helper.py in background...${COLORS[RESET]}"
-            start_project_background "firewall.py" 2>/dev/null || true
-            return 0
-            ;;
-        2)
-            echo -e "${COLORS[BLUE]}Returning to main menu...${COLORS[RESET]}"
-            return 0
-            ;;
-        3)
-            echo -e "${COLORS[CYAN]}Exiting (background processes preserved)...${COLORS[RESET]}"
-            NORMAL_EXIT=true
-            exit 0
-            ;;
-        4)
-            echo -e "${COLORS[RED]}Stopping all processes and exiting...${COLORS[RESET]}"
-            FORCE_CLEANUP=true
-            cleanup_and_exit
-            ;;
-        *)
-            echo -e "${COLORS[BLUE]}Invalid choice, returning to menu...${COLORS[RESET]}"
-            return 0
-            ;;
-        esac
-    fi
-}
-
-# =================================================================
-# PROJECT MANAGEMENT FUNCTIONS - ENHANCED
-# =================================================================
-
-setup_project() {
-    echo -e "${COLORS[BOLD]}${COLORS[BLUE]}=== Setting up WAF Project ===${COLORS[RESET]}"
+clone_project() {
+    log "INFO" "Cloning WAF project..."
+    echo -e "${COLORS[CYAN]}Cloning Web Application Firewall project...${COLORS[RESET]}"
     
-    # Check if project already exists
+    # Remove existing directory if it exists
     if [[ -d "$PROJECT_DIR" ]]; then
-        echo -e "${COLORS[YELLOW]}Project directory already exists${COLORS[RESET]}"
-        safe_read "$(echo -e "${COLORS[YELLOW]}Reinstall? [y/N]: ${COLORS[RESET]}")" 10 "n"
-        if [[ "${REPLY,,}" != "y" ]]; then
-            return 0
-        fi
-        
-        # Backup existing installation
-        if [[ -d "$PROJECT_DIR" ]]; then
-            log "INFO" "Creating backup of existing installation"
-            mkdir -p "$BACKUP_DIR"
-            cp -r "$PROJECT_DIR" "$BACKUP_DIR/" 2>/dev/null || true
-        fi
-    fi
-    
-    # Install dependencies
-    echo -e "${COLORS[CYAN]}Installing system dependencies...${COLORS[RESET]}"
-    apt-get update -qq
-    apt-get install -y git python3 python3-venv python3-full python3-pip curl wget build-essential || {
-        log "ERROR" "Failed to install dependencies"
-        return 1
-    }
-    
-    # Clone repository
-    echo -e "${COLORS[CYAN]}Cloning repository...${COLORS[RESET]}"
-    if [[ -d "$PROJECT_DIR" ]]; then
+        log "INFO" "Removing existing project directory..."
         rm -rf "$PROJECT_DIR"
     fi
     
+    # Clone the repository
     git clone "$REPO_URL" "$PROJECT_DIR" || {
         log "ERROR" "Failed to clone repository"
         return 1
     }
     
-    # Setup Python virtual environment
-    setup_python_environment || {
-        log "ERROR" "Failed to setup Python environment"
+    log "SUCCESS" "Project cloned successfully"
+    echo -e "${COLORS[GREEN]}✓ Project cloned successfully${COLORS[RESET]}"
+    return 0
+}
+
+install_dependencies() {
+    log "INFO" "Installing system dependencies..."
+    echo -e "${COLORS[CYAN]}Installing system dependencies...${COLORS[RESET]}"
+    
+    # Update package list
+    apt-get update -qq || {
+        log "ERROR" "Failed to update package list"
         return 1
     }
     
-    # Make scripts executable
-    chmod +x "$PROJECT_DIR"/*.py 2>/dev/null || true
+    # Install essential packages
+    local packages=(
+        "git"
+        "curl"
+        "wget"
+        "python3"
+        "python3-pip"
+        "python3-venv"
+        "python3-dev"
+        "build-essential"
+        "libssl-dev"
+        "libffi-dev"
+        "nginx"
+        "ufw"
+    )
     
-    log "SUCCESS" "Project setup completed"
-    echo -e "${COLORS[GREEN]}✓ Project installed successfully${COLORS[RESET]}"
-    safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
+    for package in "${packages[@]}"; do
+        log "INFO" "Installing $package..."
+        apt-get install -y "$package" || {
+            log "WARN" "Failed to install $package"
+        }
+    done
+    
+    log "SUCCESS" "System dependencies installed"
+    echo -e "${COLORS[GREEN]}✓ System dependencies installed${COLORS[RESET]}"
+    return 0
 }
 
-# Enhanced function to start project with helper.py integration
-start_project_with_helper() {
-    local main_script="${1:-firewall.py}"
-    local python_exec=$(get_python_executable)
+# =================================================================
+# HELPER.PY MANAGEMENT
+# =================================================================
+
+prepare_helper_environment() {
+    log "INFO" "Preparing environment variables for helper.py..."
     
-    echo -e "${COLORS[BOLD]}${COLORS[BLUE]}=== Starting WAF Project with Helper Integration ===${COLORS[RESET]}"
+    # Export MySQL configuration if available
+    if [[ -f "$MYSQL_CONFIG_FILE" ]]; then
+        export MYSQL_CONFIG_FILE
+        log "INFO" "MySQL configuration file set: $MYSQL_CONFIG_FILE"
+    fi
     
-    # Change to project directory
-    cd "$PROJECT_DIR" || {
-        log "ERROR" "Failed to change to project directory"
-        echo -e "${COLORS[RED]}Failed to change to project directory${COLORS[RESET]}"
-        return 1
+    # Set environment variables to prevent interactive prompts
+    export WAF_AUTO_MODE=1
+    export WAF_SKIP_INTERACTIVE=1
+    export DEBIAN_FRONTEND=noninteractive
+    
+    # Create a configuration directory for helper.py
+    local config_dir="$PROJECT_DIR/.waf_config"
+    mkdir -p "$config_dir"
+    
+    # Create a configuration file for helper.py to indicate non-interactive mode
+    cat > "$config_dir/auto_config.json" << EOF
+{
+    "auto_mode": true,
+    "skip_interactive": true,
+    "mysql_config_file": "${MYSQL_CONFIG_FILE:-}",
+    "log_file": "${HELPER_LOG_FILE}",
+    "run_mode": "background",
+    "database": {
+        "name": "admin",
+        "table": "user",
+        "columns": ["username", "password_hash"]
     }
-    
-    # Step 1: Check and start helper.py
-    if check_helper_py; then
-        if ! start_helper_background; then
-            echo -e "${COLORS[YELLOW]}Continuing without helper.py...${COLORS[RESET]}"
-        else
-            # Wait for helper to be ready (optional)
-            wait_for_helper_ready
-        fi
-    else
-        echo -e "${COLORS[YELLOW]}Skipping helper.py (not found or not executable)${COLORS[RESET]}"
-    fi
-    
-    # Step 2: Start main firewall script
-    echo -e "${COLORS[CYAN]}Starting main firewall application...${COLORS[RESET]}"
-    
-    if [[ ! -f "$main_script" ]]; then
-        log "ERROR" "$main_script not found in $PROJECT_DIR"
-        echo -e "${COLORS[RED]}Error: $main_script not found in $PROJECT_DIR${COLORS[RESET]}"
-        stop_helper  # Clean up helper if main script fails
-        return 1
-    fi
-    
-    # Make main script executable if needed
-    chmod +x "$main_script" 2>/dev/null || true
-    
-    # Start the main application using virtual environment python
-    log "INFO" "Executing: $python_exec $main_script"
-    echo -e "${COLORS[GREEN]}Executing: $python_exec $main_script${COLORS[RESET]}"
-    "$python_exec" "$main_script"
 }
-
-# Enhanced background project starter
-start_project_background() {
-    local main_script="${1:-firewall.py}"
-    local python_exec=$(get_python_executable)
-    
-    log "INFO" "Starting WAF project in background"
-    echo -e "${COLORS[CYAN]}Starting WAF project in background...${COLORS[RESET]}"
-    
-    # Check if already running
-    if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-        echo -e "${COLORS[YELLOW]}Project is already running (PID: $(cat "$PID_FILE"))${COLORS[RESET]}"
-        return 0
-    fi
-    
-    cd "$PROJECT_DIR" || return 1
-    
-    # Start helper.py first
-    if check_helper_py; then
-        start_helper_background || echo -e "${COLORS[YELLOW]}Continuing without helper.py...${COLORS[RESET]}"
-    fi
-    
-    # Start main script in background using virtual environment python
-    nohup "$python_exec" "$main_script" > "$BG_LOG_FILE" 2>&1 &
-    local main_pid=$!
-    
-    echo "$main_pid" > "$PID_FILE"
-    
-    sleep 2
-    if kill -0 "$main_pid" 2>/dev/null; then
-        log "SUCCESS" "Project started in background (PID: $main_pid)"
-        echo -e "${COLORS[GREEN]}✓ Project started in background (PID: $main_pid)${COLORS[RESET]}"
-        echo -e "${COLORS[DIM]}Background log: $BG_LOG_FILE${COLORS[RESET]}"
-        if [[ "$HELPER_RUNNING" == "true" ]]; then
-            echo -e "${COLORS[DIM]}Helper log: $HELPER_LOG_FILE${COLORS[RESET]}"
-        fi
-        return 0
-    else
-        log "ERROR" "Failed to start project in background"
-        echo -e "${COLORS[RED]}✗ Failed to start project in background${COLORS[RESET]}"
-        rm -f "$PID_FILE"
-        stop_helper
-        return 1
-    fi
-}
-
-stop_project_background() {
-    if [[ -f "$PID_FILE" ]]; then
-        local pid=$(cat "$PID_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
-            log "INFO" "Stopping background project (PID: $pid)"
-            echo -e "${COLORS[YELLOW]}Stopping background project (PID: $pid)...${COLORS[RESET]}"
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-            echo -e "${COLORS[GREEN]}✓ Background project stopped${COLORS[RESET]}"
-        else
-            echo -e "${COLORS[YELLOW]}Background project not running (stale PID file)${COLORS[RESET]}"
-        fi
-        rm -f "$PID_FILE"
-    else
-        echo -e "${COLORS[YELLOW]}No background project running${COLORS[RESET]}"
-    fi
-    
-    # Also stop helper.py
-    stop_helper
-}
-
-uninstall_project() {
-    echo -e "${COLORS[RED]}${COLORS[BOLD]}=== Uninstall Project ===${COLORS[RESET]}"
-    safe_read "$(echo -e "${COLORS[RED]}Really uninstall? [y/N]: ${COLORS[RESET]}")" 10 "n"
-    
-    if [[ "${REPLY,,}" == "y" ]]; then
-        # Stop any running processes first
-        stop_project_background
-        
-        if [[ -d "$PROJECT_DIR" ]]; then
-            log "INFO" "Removing project directory"
-            rm -rf "$PROJECT_DIR"
-            echo -e "${COLORS[GREEN]}✓ Project uninstalled${COLORS[RESET]}"
-        else
-            echo -e "${COLORS[YELLOW]}Project not installed${COLORS[RESET]}"
-        fi
-        
-        # Clean up system command if installed
-        remove_system_command
-    else
-        echo -e "${COLORS[CYAN]}Uninstall cancelled${COLORS[RESET]}"
-    fi
-    
-    safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-}
-
-# =================================================================
-# SYSTEM COMMAND FUNCTIONS
-# =================================================================
-
-install_system_command() {
-    local cmd_name="firewall"
-    local install_dir="/usr/local/bin"
-    local script_dir="/usr/local/bin/custom-scripts"
-    local symlink_path="$install_dir/$cmd_name"
-    
-    echo -e "${COLORS[CYAN]}Installing system command '$cmd_name'...${COLORS[RESET]}"
-    
-    if [[ ! -d "$PROJECT_DIR" ]]; then
-        log "ERROR" "Project not installed"
-        echo -e "${COLORS[RED]}Error: Project not installed${COLORS[RESET]}"
-        return 1
-    fi
-    
-    # Create custom scripts directory
-    mkdir -p "$script_dir"
-    
-    # Create wrapper script with virtual environment support
-    cat > "$script_dir/$cmd_name" << 'EOF'
-#!/bin/bash
-# WAF System Command Wrapper with Virtual Environment Support
-PROJECT_DIR="/Web-Application-FireWall"
-VENV_DIR="$PROJECT_DIR/venv"
-HELPER_PID_FILE="/tmp/waf_helper.pid"
-HELPER_LOG_FILE="/tmp/waf_helper.log"
-
-# Function to get correct Python executable
-get_python_executable() {
-    if [[ -f "$VENV_DIR/bin/python" ]]; then
-        echo "$VENV_DIR/bin/python"
-    else
-        echo "python3"
-    fi
-}
-
-# Function to start helper.py if not running
-start_helper_if_needed() {
-    if [[ -f "$PROJECT_DIR/helper.py" ]] && [[ ! -f "$HELPER_PID_FILE" || ! $(kill -0 "$(cat "$HELPER_PID_FILE")" 2>/dev/null) ]]; then
-        echo "Starting helper.py..."
-        local python_exec=$(get_python_executable)
-        cd "$PROJECT_DIR"
-        nohup "$python_exec" "$PROJECT_DIR/helper.py" > "$HELPER_LOG_FILE" 2>&1 &
-        echo $! > "$HELPER_PID_FILE"
-        sleep 2
-        echo "Helper.py started successfully"
-    fi
-}
-
-if [[ -d "$PROJECT_DIR" ]]; then
-    cd "$PROJECT_DIR"
-    start_helper_if_needed
-    python_exec=$(get_python_executable)
-    "$python_exec" firewall.py "$@"
-else
-    echo "Error: WAF project not found at $PROJECT_DIR"
-    exit 1
-fi
 EOF
     
-    chmod +x "$script_dir/$cmd_name"
+    log "SUCCESS" "Helper environment prepared"
+}
+
+run_helper_script() {
+    log "INFO" "Running helper.py script..."
+    echo -e "${COLORS[CYAN]}Running helper.py preprocessing script...${COLORS[RESET]}"
     
-    # Create symlink
-    if [[ -L "$symlink_path" ]]; then
-        rm "$symlink_path"
+    cd "$PROJECT_DIR" || {
+        log "ERROR" "Failed to change to project directory"
+        return 1
+    }
+    
+    # Check if helper.py exists
+    if [[ ! -f "helper.py" ]]; then
+        log "WARN" "helper.py not found in project directory"
+        echo -e "${COLORS[YELLOW]}helper.py not found - skipping preprocessing${COLORS[RESET]}"
+        return 0
     fi
     
-    ln -s "$script_dir/$cmd_name" "$symlink_path"
+    # Activate virtual environment
+    source "$VENV_DIR/bin/activate" || {
+        log "ERROR" "Failed to activate virtual environment"
+        return 1
+    }
     
-    # Verify installation
-    if command -v "$cmd_name" >/dev/null 2>&1; then
-        log "SUCCESS" "System command '$cmd_name' installed"
-        echo -e "${COLORS[GREEN]}✓ System command '$cmd_name' installed${COLORS[RESET]}"
-        echo -e "${COLORS[CYAN]}You can now run: $cmd_name${COLORS[RESET]}"
-        echo -e "${COLORS[DIM]}This will automatically start helper.py before firewall.py using the virtual environment${COLORS[RESET]}"
-    else
-        log "ERROR" "Failed to install system command"
-        echo -e "${COLORS[RED]}✗ Failed to install system command${COLORS[RESET]}"
+    # Get Python executable
+    local python_exec=$(get_python_executable)
+    if [[ -z "$python_exec" ]]; then
+        log "ERROR" "No Python executable found"
         return 1
     fi
-}
-
-remove_system_command() {
-    local cmd_name="firewall"
-    local install_dir="/usr/local/bin"
-    local script_dir="/usr/local/bin/custom-scripts"
-    local symlink_path="$install_dir/$cmd_name"
     
-    if command -v "$cmd_name" >/dev/null 2>&1; then
-        log "INFO" "Removing system command '$cmd_name'"
-        echo -e "${COLORS[YELLOW]}Removing system command '$cmd_name'...${COLORS[RESET]}"
+    # Prepare environment for helper.py
+    prepare_helper_environment
+    
+    # Set MySQL environment variables if configured
+    if [[ "$MYSQL_CONFIGURED" == "true" ]] && [[ -f "$MYSQL_CONFIG_FILE" ]]; then
+        source "$MYSQL_CONFIG_FILE"
+        export MYSQL_ROOT_PASSWORD MYSQL_DATABASE MYSQL_USER MYSQL_USER_PASSWORD
+        log "INFO" "MySQL configuration loaded for helper.py"
+    fi
+    
+    # Run helper.py in background and capture PID
+    log "INFO" "Starting helper.py in background..."
+    "$python_exec" helper.py > "$HELPER_LOG_FILE" 2>&1 &
+    local helper_pid=$!
+    echo "$helper_pid" > "$HELPER_PID_FILE"
+    HELPER_RUNNING=true
+    
+    log "INFO" "helper.py started with PID: $helper_pid"
+    echo -e "${COLORS[GREEN]}✓ helper.py started successfully (PID: $helper_pid)${COLORS[RESET]}"
+    
+    # Wait for helper.py to complete or timeout
+    local timeout=300  # 5 minutes timeout
+    local elapsed=0
+    
+    echo -e "${COLORS[CYAN]}Waiting for helper.py to complete...${COLORS[RESET]}"
+    
+    while kill -0 "$helper_pid" 2>/dev/null && [[ $elapsed -lt $timeout ]]; do
+        sleep 5
+        elapsed=$((elapsed + 5))
+        echo -n "."
+    done
+    echo
+    
+    if kill -0 "$helper_pid" 2>/dev/null; then
+        log "WARN" "helper.py still running after timeout - continuing anyway"
+        echo -e "${COLORS[YELLOW]}helper.py still running after timeout - continuing with firewall.py${COLORS[RESET]}"
+    else
+        wait "$helper_pid"
+        local exit_code=$?
+        HELPER_RUNNING=false
+        rm -f "$HELPER_PID_FILE"
         
-        # Remove symlink
-        [[ -L "$symlink_path" ]] && rm "$symlink_path"
-        
-        # Remove script
-        [[ -f "$script_dir/$cmd_name" ]] && rm "$script_dir/$cmd_name"
-        
-        echo -e "${COLORS[GREEN]}✓ System command '$cmd_name' removed${COLORS[RESET]}"
-    else
-        echo -e "${COLORS[YELLOW]}System command '$cmd_name' not installed${COLORS[RESET]}"
+        if [[ $exit_code -eq 0 ]]; then
+            log "SUCCESS" "helper.py completed successfully"
+            echo -e "${COLORS[GREEN]}✓ helper.py completed successfully${COLORS[RESET]}"
+        else
+            log "WARN" "helper.py exited with code: $exit_code"
+            echo -e "${COLORS[YELLOW]}helper.py exited with code: $exit_code - continuing anyway${COLORS[RESET]}"
+        fi
     fi
+    
+    return 0
 }
 
 # =================================================================
-# STATUS AND MONITORING FUNCTIONS
+# FIREWALL EXECUTION
 # =================================================================
 
-show_project_status() {
-    echo -e "${COLORS[CYAN]}${COLORS[BOLD]}PROJECT STATUS${COLORS[RESET]}"
-    echo "================================="
-
-    if [[ -d "$PROJECT_DIR" ]]; then
-        echo -e "${COLORS[GREEN]}✓ Project: INSTALLED${COLORS[RESET]}"
-        echo -e "Location: $PROJECT_DIR"
-
-        # Check virtual environment
-        if [[ -d "$VENV_DIR" ]]; then
-            echo -e "${COLORS[GREEN]}✓ Virtual Environment: CONFIGURED${COLORS[RESET]}"
-            echo -e "Location: $VENV_DIR"
-        else
-            echo -e "${COLORS[YELLOW]}○ Virtual Environment: NOT CONFIGURED${COLORS[RESET]}"
-        fi
-
-        # Check helper.py status
-        if is_helper_running; then
-            local helper_pid=$(cat "$HELPER_PID_FILE")
-            echo -e "${COLORS[GREEN]}✓ Helper.py: RUNNING (PID: $helper_pid)${COLORS[RESET]}"
-        else
-            echo -e "${COLORS[YELLOW]}○ Helper.py: NOT RUNNING${COLORS[RESET]}"
-        fi
-
-        # Check main project status
-        if is_project_running; then
-            local pid=$(cat "$PID_FILE")
-            echo -e "${COLORS[GREEN]}✓ Background: RUNNING (PID: $pid)${COLORS[RESET]}"
-        else
-            echo -e "${COLORS[RED]}✗ Background: NOT RUNNING${COLORS[RESET]}"
-        fi
-    else
-        echo -e "${COLORS[RED]}✗ Project: NOT INSTALLED${COLORS[RESET]}"
+run_firewall_script() {
+    log "INFO" "Running firewall.py script..."
+    echo -e "${COLORS[CYAN]}Running main firewall.py script...${COLORS[RESET]}"
+    
+    cd "$PROJECT_DIR" || {
+        log "ERROR" "Failed to change to project directory"
+        return 1
+    }
+    
+    # Check if firewall.py exists
+    if [[ ! -f "firewall.py" ]]; then
+        log "ERROR" "firewall.py not found in project directory"
+        echo -e "${COLORS[RED]}firewall.py not found - installation incomplete${COLORS[RESET]}"
+        return 1
     fi
     
-    # Show log file locations
-    echo -e "\n${COLORS[CYAN]}Log Files:${COLORS[RESET]}"
-    [[ -f "$HELPER_LOG_FILE" ]] && echo -e "${COLORS[DIM]}  Helper: $HELPER_LOG_FILE${COLORS[RESET]}"
-    [[ -f "$BG_LOG_FILE" ]] && echo -e "${COLORS[DIM]}  Background: $BG_LOG_FILE${COLORS[RESET]}"
-    [[ -f "$LOG_FILE" ]] && echo -e "${COLORS[DIM]}  Installer: $LOG_FILE${COLORS[RESET]}"
+    # Activate virtual environment
+    source "$VENV_DIR/bin/activate" || {
+        log "ERROR" "Failed to activate virtual environment"
+        return 1
+    }
     
-    # Check for helper.py file
-    if [[ -f "$PROJECT_DIR/helper.py" ]]; then
-        echo -e "${COLORS[GREEN]}✓ Helper.py: FOUND${COLORS[RESET]}"
-    else
-        echo -e "${COLORS[YELLOW]}○ Helper.py: NOT FOUND${COLORS[RESET]}"
+    # Get Python executable
+    local python_exec=$(get_python_executable)
+    if [[ -z "$python_exec" ]]; then
+        log "ERROR" "No Python executable found"
+        return 1
     fi
     
-    # Check system command
-    if command -v firewall >/dev/null 2>&1; then
-        echo -e "${COLORS[GREEN]}✓ System Command: INSTALLED${COLORS[RESET]}"
-    else
-        echo -e "${COLORS[YELLOW]}○ System Command: NOT INSTALLED${COLORS[RESET]}"
-    fi
-}
-
-view_background_logs() {
-    echo -e "${COLORS[CYAN]}${COLORS[BOLD]}=== Background Logs ===${COLORS[RESET]}"
-    
-    if [[ -f "$BG_LOG_FILE" ]]; then
-        echo -e "${COLORS[CYAN]}Main Background Logs (last 20 lines):${COLORS[RESET]}"
-        echo "=================================================="
-        tail -20 "$BG_LOG_FILE" 2>/dev/null || echo "No logs available"
-        echo
-    else
-        echo -e "${COLORS[YELLOW]}No main background log file found${COLORS[RESET]}"
+    # Set MySQL environment variables if configured
+    if [[ "$MYSQL_CONFIGURED" == "true" ]] && [[ -f "$MYSQL_CONFIG_FILE" ]]; then
+        source "$MYSQL_CONFIG_FILE"
+        export MYSQL_ROOT_PASSWORD MYSQL_DATABASE MYSQL_USER MYSQL_USER_PASSWORD
+        log "INFO" "MySQL configuration loaded for firewall.py"
     fi
     
-    if [[ -f "$HELPER_LOG_FILE" ]]; then
-        echo -e "${COLORS[CYAN]}Helper.py Logs (last 20 lines):${COLORS[RESET]}"
-        echo "=================================================="
-        tail -20 "$HELPER_LOG_FILE" 2>/dev/null || echo "No helper logs available"
-        echo
-    else
-        echo -e "${COLORS[YELLOW]}No helper log file found${COLORS[RESET]}"
-    fi
+    # Run firewall.py interactively to show the menu
+    log "INFO" "Starting firewall.py with interactive menu..."
+    echo -e "${COLORS[GREEN]}Starting Web Application Firewall with interactive menu...${COLORS[RESET]}"
+    echo -e "${COLORS[DIM]}Press Ctrl+C to return to installer menu${COLORS[RESET]}"
     
-    safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
+    # Run firewall.py interactively
+    "$python_exec" firewall.py
+    
+    log "SUCCESS" "firewall.py execution completed"
+    echo -e "${COLORS[GREEN]}✓ Returned from firewall.py${COLORS[RESET]}"
+    
+    return 0
 }
 
 # =================================================================
-# ENHANCED MENU SYSTEM
+# MENU SYSTEM
 # =================================================================
 
-run_project_interactive() {
-    echo -e "${COLORS[BOLD]}${COLORS[BLUE]}=== Run WAF Project ===${COLORS[RESET]}"
-    echo -e "${COLORS[CYAN]}Choose execution mode:${COLORS[RESET]}"
-    echo -e "${COLORS[GREEN]}1) Run interactively (helper.py + firewall.py)${COLORS[RESET]}"
-    echo -e "${COLORS[BLUE]}2) Run in background${COLORS[RESET]}"
-    echo -e "${COLORS[YELLOW]}3) Show project status${COLORS[RESET]}"
-    echo -e "${COLORS[RED]}4) Stop all processes${COLORS[RESET]}"
-    echo -e "${COLORS[WHITE]}5) Back to main menu${COLORS[RESET]}"
-    
-    safe_read "$(echo -e "${COLORS[YELLOW]}Choose [1-5]: ${COLORS[RESET]}")" 30 "5"
-    
-    case "${REPLY:-5}" in
-    1)
-        if [[ -d "$PROJECT_DIR" ]]; then
-            start_project_with_helper "firewall.py"
-        else
-            echo -e "${COLORS[RED]}Project not installed${COLORS[RESET]}"
-        fi
-        ;;
-    2)
-        if [[ -d "$PROJECT_DIR" ]]; then
-            start_project_background "firewall.py"
-        else
-            echo -e "${COLORS[RED]}Project not installed${COLORS[RESET]}"
-        fi
-        ;;
-    3)
-        show_project_status
-        safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-        ;;
-    4)
-        echo -e "${COLORS[RED]}Stopping all processes...${COLORS[RESET]}"
-        stop_project_background
-        ;;
-    5)
-        return 0
-        ;;
-    *)
-        echo -e "${COLORS[RED]}Invalid choice${COLORS[RESET]}"
-        ;;
-    esac
+show_banner() {
+    clear
+    echo -e "${COLORS[CYAN]}${COLORS[BOLD]}"
+    echo "=================================================================="
+    echo "    Web Application Firewall - Enhanced Installer"
+    echo "    Version: 2.0 with Helper.py Integration"
+    echo "    Database: admin | Table: user | Columns: username, password_hash"
+    echo "=================================================================="
+    echo -e "${COLORS[RESET]}"
 }
 
-# =================================================================
-# MAIN MENU SYSTEM
-# =================================================================
+show_main_menu() {
+    echo -e "${COLORS[CYAN]}${COLORS[BOLD]}Main Menu:${COLORS[RESET]}"
+    echo -e "${COLORS[WHITE]}1.${COLORS[RESET]} Full Installation (Recommended)"
+    echo -e "${COLORS[WHITE]}2.${COLORS[RESET]} Custom Installation"
+    echo -e "${COLORS[WHITE]}3.${COLORS[RESET]} System Status Check"
+    echo -e "${COLORS[WHITE]}4.${COLORS[RESET]} MySQL Configuration Only"
+    echo -e "${COLORS[WHITE]}5.${COLORS[RESET]} View Installation Logs"
+    echo -e "${COLORS[WHITE]}6.${COLORS[RESET]} Run Helper.py Only"
+    echo -e "${COLORS[WHITE]}7.${COLORS[RESET]} Run Firewall.py Only"
+    echo -e "${COLORS[WHITE]}8.${COLORS[RESET]} Uninstall WAF"
+    echo -e "${COLORS[WHITE]}9.${COLORS[RESET]} Exit"
+    echo
+}
 
-main_menu() {
-    # Set up signal handlers
-    trap safe_interrupt_handler SIGINT SIGTERM
-    trap cleanup_and_exit EXIT
+show_custom_menu() {
+    echo -e "${COLORS[CYAN]}${COLORS[BOLD]}Custom Installation Options:${COLORS[RESET]}"
+    echo -e "${COLORS[WHITE]}1.${COLORS[RESET]} Install Dependencies Only"
+    echo -e "${COLORS[WHITE]}2.${COLORS[RESET]} Install MySQL Only"
+    echo -e "${COLORS[WHITE]}3.${COLORS[RESET]} Clone Project Only"
+    echo -e "${COLORS[WHITE]}4.${COLORS[RESET]} Setup Python Environment Only"
+    echo -e "${COLORS[WHITE]}5.${COLORS[RESET]} Run Helper.py Only"
+    echo -e "${COLORS[WHITE]}6.${COLORS[RESET]} Run Firewall.py Only"
+    echo -e "${COLORS[WHITE]}7.${COLORS[RESET]} Back to Main Menu"
+    echo
+}
 
+handle_main_menu() {
     while true; do
-        clear
-        echo -e "${COLORS[BOLD]}${COLORS[CYAN]}"
-        echo "================================================================"
-        echo "       Web Application Firewall Installer (Enhanced)"
-        echo "              with Helper.py & Virtual Environment"
-        echo "================================================================"
-        echo -e "${COLORS[RESET]}"
-
-        echo -e "${COLORS[BLUE]}  1)${COLORS[RESET]} Install/Setup Project (with Virtual Environment)"
-        echo -e "${COLORS[GREEN]}  2)${COLORS[RESET]} Run Project (Interactive/Background)"
-        echo -e "${COLORS[YELLOW]}  3)${COLORS[RESET]} Stop Background Process"
-        echo -e "${COLORS[CYAN]}  4)${COLORS[RESET]} Show Project Status"
-        echo -e "${COLORS[MAGENTA]}  5)${COLORS[RESET]} View Background Logs"
-        echo -e "${COLORS[RED]}  6)${COLORS[RESET]} Uninstall Project"
-        echo -e "${COLORS[GREEN]}  7)${COLORS[RESET]} Install 'firewall' system command"
-        echo -e "${COLORS[RED]}  8)${COLORS[RESET]} Remove 'firewall' system command"
-        echo -e "${COLORS[WHITE]}  9)${COLORS[RESET]} Exit (preserve background processes)"
-        echo -e "${COLORS[RED]} 10)${COLORS[RESET]} Exit and stop all processes"
-        echo
-
-        # Safe input with timeout
-        safe_read "$(echo -e "${COLORS[YELLOW]}Choose option [1-10]: ${COLORS[RESET]}")" 30 "9"
-
-        case "${REPLY:-9}" in
-        1) 
-            setup_project 
-            ;;
-        2)
-            run_project_interactive
-            ;;
-        3)
-            stop_project_background
-            safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-            ;;
-        4)
-            show_project_status
-            safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-            ;;
-        5)
-            view_background_logs
-            ;;
-        6)
-            uninstall_project
-            ;;
-        7)
-            install_system_command
-            safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-            ;;
-        8)
-            remove_system_command
-            safe_read "$(echo -e "${COLORS[CYAN]}Press Enter to continue...${COLORS[RESET]}")" 10
-            ;;
-        9)
-            # Normal exit - preserve background processes
-            NORMAL_EXIT=true
-            echo -e "${COLORS[GREEN]}Exiting (background processes preserved)...${COLORS[RESET]}"
-            break
-            ;;
-        10)
-            # Exit and cleanup
-            echo -e "${COLORS[YELLOW]}Stopping all background processes...${COLORS[RESET]}"
-            stop_project_background
-            NORMAL_EXIT=true
-            break
-            ;;
-        *)
-            log "ERROR" "Invalid option: ${REPLY}"
-            echo -e "${COLORS[RED]}Invalid option${COLORS[RESET]}"
-            sleep 1
-            ;;
+        show_banner
+        show_main_menu
+        
+        safe_read "Please select an option [1-9]: " 30 "1"
+        local choice="$REPLY"
+        
+        case "$choice" in
+            1)
+                echo -e "${COLORS[GREEN]}Starting Full Installation...${COLORS[RESET]}"
+                full_installation
+                ;;
+            2)
+                handle_custom_menu
+                ;;
+            3)
+                system_status_check
+                ;;
+            4)
+                mysql_configuration_only
+                ;;
+            5)
+                view_logs
+                ;;
+            6)
+                echo -e "${COLORS[GREEN]}Running Helper.py...${COLORS[RESET]}"
+                run_helper_script
+                pause_for_user
+                ;;
+            7)
+                echo -e "${COLORS[GREEN]}Running Firewall.py...${COLORS[RESET]}"
+                run_firewall_script
+                pause_for_user
+                ;;
+            8)
+                uninstall_waf
+                ;;
+            9)
+                echo -e "${COLORS[CYAN]}Thank you for using WAF Installer!${COLORS[RESET]}"
+                NORMAL_EXIT=true
+                exit 0
+                ;;
+            *)
+                echo -e "${COLORS[RED]}Invalid option. Please try again.${COLORS[RESET]}"
+                sleep 2
+                ;;
         esac
     done
 }
 
+handle_custom_menu() {
+    while true; do
+        show_banner
+        show_custom_menu
+        
+        safe_read "Please select an option [1-7]: " 30 "7"
+        local choice="$REPLY"
+        
+        case "$choice" in
+            1)
+                echo -e "${COLORS[GREEN]}Installing Dependencies...${COLORS[RESET]}"
+                install_dependencies
+                pause_for_user
+                ;;
+            2)
+                echo -e "${COLORS[GREEN]}Installing MySQL...${COLORS[RESET]}"
+                install_mysql && configure_mysql_credentials
+                pause_for_user
+                ;;
+            3)
+                echo -e "${COLORS[GREEN]}Cloning Project...${COLORS[RESET]}"
+                clone_project
+                pause_for_user
+                ;;
+            4)
+                echo -e "${COLORS[GREEN]}Setting up Python Environment...${COLORS[RESET]}"
+                setup_python_environment
+                pause_for_user
+                ;;
+            5)
+                echo -e "${COLORS[GREEN]}Running Helper.py...${COLORS[RESET]}"
+                run_helper_script
+                pause_for_user
+                ;;
+            6)
+                echo -e "${COLORS[GREEN]}Running Firewall.py...${COLORS[RESET]}"
+                run_firewall_script
+                pause_for_user
+                ;;
+            7)
+                return
+                ;;
+            *)
+                echo -e "${COLORS[RED]}Invalid option. Please try again.${COLORS[RESET]}"
+                sleep 2
+                ;;
+        esac
+    done
+}
+
+pause_for_user() {
+    echo
+    safe_read "Press Enter to continue..." 30
+}
+
 # =================================================================
-# STARTUP
+# INSTALLATION FUNCTIONS
 # =================================================================
 
-# Initialize logging
-echo "WAF Installer Enhanced with Virtual Environment - $(date)" > "$LOG_FILE"
-log "INFO" "Starting Enhanced WAF Installer with Helper.py Integration and Virtual Environment Support"
+full_installation() {
+    log "INFO" "Starting full WAF installation"
+    
+    # Phase 1: System checks and prerequisites
+    echo -e "${COLORS[MAGENTA]}Phase 1: System Checks${COLORS[RESET]}"
+    check_root
+    check_system
+    
+    # Phase 2: Install dependencies
+    echo -e "\n${COLORS[MAGENTA]}Phase 2: Installing Dependencies${COLORS[RESET]}"
+    install_dependencies || {
+        log "ERROR" "Failed to install dependencies"
+        pause_for_user
+        return 1
+    }
+    
+    # Phase 3: MySQL installation and configuration
+    echo -e "\n${COLORS[MAGENTA]}Phase 3: MySQL Setup${COLORS[RESET]}"
+    if install_mysql; then
+        configure_mysql_credentials || {
+            log "WARN" "MySQL configuration failed, continuing without it"
+        }
+    else
+        log "ERROR" "MySQL installation failed"
+        echo -e "${COLORS[RED]}MySQL installation failed - continuing without database${COLORS[RESET]}"
+    fi
+    
+    # Phase 4: Project setup
+    echo -e "\n${COLORS[MAGENTA]}Phase 4: Project Setup${COLORS[RESET]}"
+    clone_project || {
+        log "ERROR" "Failed to clone project"
+        pause_for_user
+        return 1
+    }
+    
+    setup_python_environment || {
+        log "ERROR" "Failed to setup Python environment"
+        pause_for_user
+        return 1
+    }
+    
+    # Phase 5: Setup MySQL database with correct schema
+    if [[ "$MYSQL_CONFIGURED" == "true" ]]; then
+        echo -e "\n${COLORS[MAGENTA]}Phase 5: Database Setup${COLORS[RESET]}"
+        setup_mysql_database
+    fi
+    
+    # Phase 6: Run helper.py (BEFORE firewall.py)
+    echo -e "\n${COLORS[MAGENTA]}Phase 6: Running Helper Script${COLORS[RESET]}"
+    run_helper_script || {
+        log "WARN" "Helper script execution had issues, continuing anyway"
+    }
+    
+    # Phase 7: Run firewall.py (AFTER helper.py) - Interactive
+    echo -e "\n${COLORS[MAGENTA]}Phase 7: Starting Firewall${COLORS[RESET]}"
+    echo -e "${COLORS[CYAN]}The firewall will now start with its interactive menu.${COLORS[RESET]}"
+    echo -e "${COLORS[YELLOW]}You can return to this installer by exiting the firewall.${COLORS[RESET]}"
+    pause_for_user
+    
+    run_firewall_script || {
+        log "ERROR" "Failed to start firewall"
+        pause_for_user
+        return 1
+    }
+    
+    # Show completion message
+    show_completion_message
+    
+    log "SUCCESS" "Full WAF installation completed successfully"
+    pause_for_user
+}
 
-echo -e "${COLORS[GREEN]}Enhanced WAF installer with helper.py integration and virtual environment support loaded${COLORS[RESET]}"
-echo -e "${COLORS[CYAN]}Log file: $LOG_FILE${COLORS[RESET]}"
+system_status_check() {
+    echo -e "${COLORS[CYAN]}System Status Check${COLORS[RESET]}"
+    echo "=================================="
+    
+    # Check if project exists
+    if [[ -d "$PROJECT_DIR" ]]; then
+        echo -e "Project Directory: ${COLORS[GREEN]}✓ Exists${COLORS[RESET]} ($PROJECT_DIR)"
+    else
+        echo -e "Project Directory: ${COLORS[RED]}✗ Missing${COLORS[RESET]} ($PROJECT_DIR)"
+    fi
+    
+    # Check virtual environment
+    if [[ -d "$VENV_DIR" ]]; then
+        echo -e "Virtual Environment: ${COLORS[GREEN]}✓ Exists${COLORS[RESET]} ($VENV_DIR)"
+    else
+        echo -e "Virtual Environment: ${COLORS[RED]}✗ Missing${COLORS[RESET]} ($VENV_DIR)"
+    fi
+    
+    # Check MySQL
+    if systemctl is-active --quiet mysql; then
+        echo -e "MySQL Service: ${COLORS[GREEN]}✓ Running${COLORS[RESET]}"
+        
+        # Check if admin database exists
+        if [[ "$MYSQL_CONFIGURED" == "true" ]] && [[ -f "$MYSQL_CONFIG_FILE" ]]; then
+            source "$MYSQL_CONFIG_FILE"
+            local mysql_cmd="mysql -u root"
+            if [[ -n "$MYSQL_ROOT_PASSWORD" ]]; then
+                mysql_cmd="mysql -u root -p${MYSQL_ROOT_PASSWORD}"
+            fi
+            
+            if echo "USE admin; SHOW TABLES LIKE 'user';" | $mysql_cmd --silent --batch 2>/dev/null | grep -q "user"; then
+                echo -e "Database Schema: ${COLORS[GREEN]}✓ admin.user table exists${COLORS[RESET]}"
+            else
+                echo -e "Database Schema: ${COLORS[RED]}✗ admin.user table missing${COLORS[RESET]}"
+            fi
+        fi
+    else
+        echo -e "MySQL Service: ${COLORS[RED]}✗ Not Running${COLORS[RESET]}"
+    fi
+    
+    # Check firewall process
+    if [[ -f "$PID_FILE" ]]; then
+        local firewall_pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+        if [[ -n "$firewall_pid" ]] && kill -0 "$firewall_pid" 2>/dev/null; then
+            echo -e "Firewall Process: ${COLORS[GREEN]}✓ Running${COLORS[RESET]} (PID: $firewall_pid)"
+        else
+            echo -e "Firewall Process: ${COLORS[RED]}✗ Not Running${COLORS[RESET]}"
+        fi
+    else
+        echo -e "Firewall Process: ${COLORS[RED]}✗ No PID File${COLORS[RESET]}"
+    fi
+    
+    # Check helper process
+    if [[ -f "$HELPER_PID_FILE" ]]; then
+        local helper_pid=$(cat "$HELPER_PID_FILE" 2>/dev/null || echo "")
+        if [[ -n "$helper_pid" ]] && kill -0 "$helper_pid" 2>/dev/null; then
+            echo -e "Helper Process: ${COLORS[GREEN]}✓ Running${COLORS[RESET]} (PID: $helper_pid)"
+        else
+            echo -e "Helper Process: ${COLORS[YELLOW]}✓ Completed${COLORS[RESET]}"
+        fi
+    else
+        echo -e "Helper Process: ${COLORS[YELLOW]}- Not Started${COLORS[RESET]}"
+    fi
+    
+    pause_for_user
+}
 
-# Start main menu
-main_menu
+mysql_configuration_only() {
+    echo -e "${COLORS[CYAN]}MySQL Configuration${COLORS[RESET]}"
+    echo "=================================="
+    
+    # Check if MySQL is installed
+    if ! command -v mysql &> /dev/null; then
+        echo -e "${COLORS[YELLOW]}MySQL not found. Installing...${COLORS[RESET]}"
+        install_mysql || {
+            echo -e "${COLORS[RED]}Failed to install MySQL${COLORS[RESET]}"
+            pause_for_user
+            return 1
+        }
+    fi
+    
+    configure_mysql_credentials
+    
+    if [[ "$MYSQL_CONFIGURED" == "true" ]]; then
+        setup_mysql_database
+    fi
+    
+    pause_for_user
+}
 
-echo -e "${COLORS[CYAN]}Thank you for using the Enhanced WAF Installer!${COLORS[RESET]}"
+view_logs() {
+    echo -e "${COLORS[CYAN]}Installation Logs${COLORS[RESET]}"
+    echo "=================================="
+    
+    if [[ -f "$LOG_FILE" ]]; then
+        echo -e "${COLORS[WHITE]}Main Log File: $LOG_FILE${COLORS[RESET]}"
+        echo "Last 20 lines:"
+        echo "----------------------------------------"
+        tail -20 "$LOG_FILE"
+    else
+        echo -e "${COLORS[YELLOW]}No main log file found${COLORS[RESET]}"
+    fi
+    
+    echo
+    
+    if [[ -f "$BG_LOG_FILE" ]]; then
+        echo -e "${COLORS[WHITE]}Firewall Log File: $BG_LOG_FILE${COLORS[RESET]}"
+        echo "Last 10 lines:"
+        echo "----------------------------------------"
+        tail -10 "$BG_LOG_FILE"
+    else
+        echo -e "${COLORS[YELLOW]}No firewall log file found${COLORS[RESET]}"
+    fi
+    
+    echo
+    
+    if [[ -f "$HELPER_LOG_FILE" ]]; then
+        echo -e "${COLORS[WHITE]}Helper Log File: $HELPER_LOG_FILE${COLORS[RESET]}"
+        echo "Last 10 lines:"
+        echo "----------------------------------------"
+        tail -10 "$HELPER_LOG_FILE"
+    else
+        echo -e "${COLORS[YELLOW]}No helper log file found${COLORS[RESET]}"
+    fi
+    
+    pause_for_user
+}
+
+uninstall_waf() {
+    echo -e "${COLORS[RED]}${COLORS[BOLD]}WAF Uninstallation${COLORS[RESET]}"
+    echo "=================================="
+    echo -e "${COLORS[YELLOW]}This will remove all WAF components including:${COLORS[RESET]}"
+    echo "• Project directory ($PROJECT_DIR)"
+    echo "• Virtual environment"
+    echo "• Running processes"
+    echo "• Log files"
+    echo "• MySQL admin database (if configured)"
+    echo
+    
+    safe_read "Are you sure you want to uninstall? [y/N]: " 30 "n"
+    
+    if [[ "${REPLY,,}" == "y" ]]; then
+        echo -e "${COLORS[CYAN]}Uninstalling WAF...${COLORS[RESET]}"
+        
+        # Stop processes
+        if [[ -f "$PID_FILE" ]]; then
+            local firewall_pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+            if [[ -n "$firewall_pid" ]] && kill -0 "$firewall_pid" 2>/dev/null; then
+                echo "Stopping firewall process..."
+                kill -TERM "$firewall_pid" 2>/dev/null || true
+            fi
+        fi
+        
+        if [[ -f "$HELPER_PID_FILE" ]]; then
+            local helper_pid=$(cat "$HELPER_PID_FILE" 2>/dev/null || echo "")
+            if [[ -n "$helper_pid" ]] && kill -0 "$helper_pid" 2>/dev/null; then
+                echo "Stopping helper process..."
+                kill -TERM "$helper_pid" 2>/dev/null || true
+            fi
+        fi
+        
+        # Remove MySQL database if configured
+        if [[ "$MYSQL_CONFIGURED" == "true" ]] && [[ -f "$MYSQL_CONFIG_FILE" ]]; then
+            safe_read "Also remove MySQL admin database? [y/N]: " 30 "n"
+            if [[ "${REPLY,,}" == "y" ]]; then
+                source "$MYSQL_CONFIG_FILE"
+                local mysql_cmd="mysql -u root"
+                if [[ -n "$MYSQL_ROOT_PASSWORD" ]]; then
+                    mysql_cmd="mysql -u root -p${MYSQL_ROOT_PASSWORD}"
+                fi
+                
+                echo "Removing MySQL admin database..."
+                echo "DROP DATABASE IF EXISTS \`admin\`; DROP USER IF EXISTS '${MYSQL_USERNAME}'@'localhost';" | $mysql_cmd --silent --batch 2>/dev/null || true
+            fi
+        fi
+        
+        # Remove project directory
+        if [[ -d "$PROJECT_DIR" ]]; then
+            echo "Removing project directory..."
+            rm -rf "$PROJECT_DIR"
+        fi
+        
+        # Remove log files
+        echo "Removing log files..."
+        rm -f "$LOG_FILE" "$BG_LOG_FILE" "$HELPER_LOG_FILE" "$PID_FILE" "$HELPER_PID_FILE" "$MYSQL_CONFIG_FILE"
+        
+        echo -e "${COLORS[GREEN]}WAF uninstalled successfully${COLORS[RESET]}"
+    else
+        echo -e "${COLORS[CYAN]}Uninstallation cancelled${COLORS[RESET]}"
+    fi
+    
+    pause_for_user
+}
+
+show_completion_message() {
+    echo -e "\n${COLORS[GREEN]}${COLORS[BOLD]}"
+    echo "=================================================================="
+    echo "    Installation Completed Successfully!"
+    echo "=================================================================="
+    echo -e "${COLORS[RESET]}"
+    
+    echo -e "${COLORS[CYAN]}Installation Summary:${COLORS[RESET]}"
+    echo -e "• Project Directory: ${COLORS[WHITE]}$PROJECT_DIR${COLORS[RESET]}"
+    echo -e "• Virtual Environment: ${COLORS[WHITE]}$VENV_DIR${COLORS[RESET]}"
+    echo -e "• Log File: ${COLORS[WHITE]}$LOG_FILE${COLORS[RESET]}"
+    
+    if [[ "$MYSQL_CONFIGURED" == "true" ]]; then
+        echo -e "• MySQL Database: ${COLORS[GREEN]}admin (configured)${COLORS[RESET]}"
+        echo -e "• MySQL Table: ${COLORS[GREEN]}user (username, password_hash)${COLORS[RESET]}"
+        echo -e "• MySQL Config: ${COLORS[WHITE]}$MYSQL_CONFIG_FILE${COLORS[RESET]}"
+        echo -e "• Default Admin User: ${COLORS[YELLOW]}admin / admin123${COLORS[RESET]}"
+    else
+        echo -e "• MySQL Database: ${COLORS[YELLOW]}Not Configured${COLORS[RESET]}"
+    fi
+    
+    echo -e "\n${COLORS[CYAN]}Useful Commands:${COLORS[RESET]}"
+    echo -e "• Activate virtual env: ${COLORS[WHITE]}source $VENV_DIR/bin/activate${COLORS[RESET]}"
+    echo -e "• Run helper.py: ${COLORS[WHITE]}cd $PROJECT_DIR && python3 helper.py${COLORS[RESET]}"
+    echo -e "• Run firewall.py: ${COLORS[WHITE]}cd $PROJECT_DIR && python3 firewall.py${COLORS[RESET]}"
+    
+    if [[ "$MYSQL_CONFIGURED" == "true" ]]; then
+        echo -e "• Connect to MySQL: ${COLORS[WHITE]}mysql -u $MYSQL_USERNAME -p admin${COLORS[RESET]}"
+        echo -e "• View user table: ${COLORS[WHITE]}mysql -u $MYSQL_USERNAME -p -e \"SELECT username FROM admin.user;\"${COLORS[RESET]}"
+    fi
+    
+    echo -e "\n${COLORS[GREEN]}Web Application Firewall is now ready to use!${COLORS[RESET]}"
+    
+    if [[ "$MYSQL_CONFIGURED" == "true" ]]; then
+        echo -e "\n${COLORS[RED]}⚠️  SECURITY REMINDER:${COLORS[RESET]}"
+        echo -e "${COLORS[YELLOW]}Change the default admin password (admin123) immediately!${COLORS[RESET]}"
+    fi
+}
+
+# =================================================================
+# MAIN EXECUTION
+# =================================================================
+
+main() {
+    # Initialize logging
+    echo "WAF Installation Started: $(date)" > "$LOG_FILE"
+    
+    # Store main process PID
+    echo $$ > "$PID_FILE"
+    
+    log "INFO" "Starting WAF installation process"
+    
+    # Start menu system
+    handle_main_menu
+}
+
+# Run main function
+main "$@"
+
+# Clean exit message
+echo -e "${COLORS[MAGENTA]}Thank you for using the installer!${COLORS[RESET]}"
+if is_project_running; then
+    echo -e "${COLORS[GREEN]}Background processes are still running and will continue.${COLORS[RESET]}"
+fi
+log "INFO" "Installer finished"
