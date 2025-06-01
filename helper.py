@@ -116,22 +116,18 @@ def install_mysql_ubuntu():
     return True
 
 def fix_mysql_auth_and_secure():
-    """Fix MySQL authentication and secure the installation using sudo mysql"""
+    """Automatically secure MySQL with root:root credentials"""
     print("Configuring MySQL authentication and security...")
     
-    # Get the new root password
-    root_password = getpass.getpass("Set new MySQL root password: ")
-    confirm_password = getpass.getpass("Confirm MySQL root password: ")
-    
-    while root_password != confirm_password:
-        print("Passwords don't match!")
-        root_password = getpass.getpass("Set new MySQL root password: ")
-        confirm_password = getpass.getpass("Confirm MySQL root password: ")
+    # Set default credentials
+    root_password = "root"
+    confirm_password = "root"
     
     # Create SQL commands to fix authentication and secure MySQL
     sql_commands = f"""
 -- Fix root authentication
 ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{root_password}';
+SET GLOBAL validate_password.policy = STRONG;
 
 -- Remove anonymous users
 DELETE FROM mysql.user WHERE User='';
@@ -143,11 +139,15 @@ DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.
 DROP DATABASE IF EXISTS test;
 DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
 
+-- Default security settings
+SET GLOBAL validate_password.policy = STRONG;
+SET GLOBAL validate_password.length = 12;
+
 -- Flush privileges
 FLUSH PRIVILEGES;
 
 -- Show that we're done
-SELECT 'MySQL secured successfully' as Status;
+SELECT 'MySQL secured successfully with root:root credentials' as Status;
 """
     
     # Write SQL commands to a temporary file
@@ -163,7 +163,7 @@ SELECT 'MySQL secured successfully' as Status;
         os.remove(temp_sql_file)
         
         if success:
-            print("✓ MySQL authentication fixed and secured successfully")
+            print("✓ MySQL set up with default credentials (root:root)")
             return root_password
         else:
             print("✗ Failed to secure MySQL")
@@ -171,7 +171,6 @@ SELECT 'MySQL secured successfully' as Status;
             
     except Exception as e:
         print(f"✗ Error securing MySQL: {e}")
-        # Clean up temp file if it exists
         if os.path.exists(temp_sql_file):
             os.remove(temp_sql_file)
         return None
@@ -397,7 +396,7 @@ def main():
     
     if connection_type == 'no_password':
         print("Fresh MySQL installation detected")
-        # Secure MySQL and set password
+        # Automatically secure MySQL with default credentials
         mysql_password = fix_mysql_auth_and_secure()
         if mysql_password is None:
             print("✗ Failed to secure MySQL")
@@ -406,17 +405,16 @@ def main():
     
     elif connection_type == 'auth_socket':
         print("MySQL using auth_socket authentication")
-        # Fix authentication and secure MySQL
+        # Secure with default credentials
         mysql_password = fix_mysql_auth_and_secure()
         if mysql_password is None:
-            print("Using sudo mysql for database operations...")
-            connection_type = 'sudo_mysql'
-        else:
-            connection_type = 'password'
+            print("✗ Failed to secure MySQL with default credentials")
+            sys.exit(1)
+        connection_type = 'password'
     
     elif connection_type == 'password_required':
-        mysql_password = getpass.getpass("Enter existing MySQL root password: ")
-        connection_type = 'password'
+        # Use default credentials as root already has password
+        mysql_password = "root"
     
     # Get user credentials
     username, user_password = get_user_credentials()
