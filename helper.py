@@ -131,7 +131,7 @@ def install_mysql_ubuntu():
         print("✗ Failed to update package list")
         return False
     else:
-    print("✓ Package list updated")
+        print("✓ Package list updated")
     
     # Set non-interactive mode
     os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
