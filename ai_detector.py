@@ -1,22 +1,30 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
-AI Detector Module for Firewall
---------------------------------
-This module reads injection data from separate Excel files and trains a multi-class 
-RandomForestClassifier to classify requests as:
-    0: Benign
-    1: SQL Injection
-    2: XSS
-    3: DDoS (simulated via repeated GET content)
-It provides a function `detect_attack(data)` which returns the predicted label.
-A rate limiter is applied so that no more than 100 calls are allowed per minute.
+AI Detector Module (precise, XLSX-only)
+---------------------------------------
+Trains a multi-class model from ONLY the provided Excel payload files:
 
-Expected Excel Files:
-    - benign.xlsx
-    - sql_injection.xlsx
-    - xss.xlsx
-    - ddos.xlsx
-Each file should have examples in the first column.
+  payloads/benign.xlsx  -> label 0 (benign)
+  payloads/sqli.xlsx    -> label 1 (SQLi)
+  payloads/xss.xlsx     -> label 2 (XSS)
+  payloads/ddos.xlsx    -> label 3 (DDoS)
+
+Each file MUST contain examples in the FIRST column. No default/fallback data
+is used. If a file is missing or empty, training will raise a clear error.
+
+Model:
+  - TfidfVectorizer (character n-grams, 3–5) with lowercase normalization
+  - LinearSVC (strong baseline for short, obfuscated payloads)
+  - Optional hyperparameter tuning via GridSearchCV if env AI_DETECTOR_TUNE=1
+
+API:
+  - detect_attack(data: str) -> int
+        0 = benign, 1 = SQLi, 2 = XSS, 3 = DDoS
+
+Operational niceties:
+  - Thread-safe lazy loading/training
+  - On-disk caching: ai_detector_model.pkl
+  - Simple rate-limit: max 100 calls/minute (tunable)
 """
 
 import os
@@ -24,173 +32,224 @@ import time
 import threading
 import joblib
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from typing import List, Tuple
+from functools import wraps
+
+from sklearn.pipeline import Pipeline
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.svm import LinearSVC
+from sklearn.model_selection import GridSearchCV
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.exceptions import NotFittedError
+import numpy as np
 
 # ---------------------------
-# Rate Limiting Decorator
+# Config
 # ---------------------------
-def rate_limited(max_calls, period):
-    """
-    Decorator that limits the number of calls to a function.
-    
-    Args:
-        max_calls (int): Maximum number of calls allowed in the given period.
-        period (int): Period (in seconds) during which the calls are counted.
-    
-    Raises:
-        Exception: If the rate limit is exceeded.
-    """
+PAYLOAD_DIR = os.environ.get("AI_PAYLOAD_DIR", "payloads")
+FILE_MAP = {
+    0: os.path.join(PAYLOAD_DIR, "benign.xlsx"),
+    1: os.path.join(PAYLOAD_DIR, "sqli.xlsx"),
+    2: os.path.join(PAYLOAD_DIR, "xss.xlsx"),
+    3: os.path.join(PAYLOAD_DIR, "ddos.xlsx"),
+}
+MODEL_PATH = os.environ.get("AI_MODEL_PATH", "ai_detector_model.pkl")
+TUNE = os.environ.get("AI_DETECTOR_TUNE", "0") == "1"
+
+# Rate limits
+MAX_CALLS = int(os.environ.get("AI_RATE_MAX_CALLS", "100"))
+PERIOD_SEC = int(os.environ.get("AI_RATE_PERIOD", "60"))
+
+# Thread-safety
+_model_lock = threading.Lock()
+_model = None  # cached classifier pipeline
+
+
+# ---------------------------
+# Rate Limiter Decorator
+# ---------------------------
+def rate_limited(max_calls: int, period: int):
     def decorator(func):
+        calls = []
         lock = threading.Lock()
-        call_times = []
+
+        @wraps(func)
         def wrapper(*args, **kwargs):
-            nonlocal call_times
+            nonlocal calls
+            now = time.time()
             with lock:
-                now = time.time()
-                # Keep only calls within the period
-                call_times[:] = [t for t in call_times if now - t < period]
-                if len(call_times) >= max_calls:
-                    raise Exception("Rate limit exceeded for function: {}".format(func.__name__))
-                call_times.append(now)
+                # keep only calls within window
+                calls = [t for t in calls if now - t < period]
+                if len(calls) >= max_calls:
+                    raise RuntimeError(f"Rate limit exceeded for {func.__name__}")
+                calls.append(now)
             return func(*args, **kwargs)
         return wrapper
     return decorator
 
-# ---------------------------
-# Feature Extraction
-# ---------------------------
-def extract_features(data):
-    """
-    Extract features from the request data.
-    
-    Features used:
-        - Total length of the data.
-        - Count of '<' characters.
-        - Count of the substring "SELECT".
-        - Count of '/' characters.
-        - Count of "GET" occurrences.
-    """
-    return [
-        len(data),
-        data.count("<"),
-        data.count("SELECT"),
-        data.count("/"),
-        data.count("GET")
-    ]
 
 # ---------------------------
-# Helper: Load Examples from Excel
+# Data Loading (XLSX only)
 # ---------------------------
-def load_examples_from_excel(filename, default_examples):
+def _read_first_column(xlsx_path: str) -> List[str]:
+    if not os.path.exists(xlsx_path):
+        raise FileNotFoundError(
+            f"Required payload file not found: {xlsx_path}\n"
+            f"Expected files: {list(FILE_MAP.values())}"
+        )
+    try:
+        df = pd.read_excel(xlsx_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to read {xlsx_path}: {e}")
+    if df.shape[1] < 1:
+        raise ValueError(f"{xlsx_path} has no columns. Put examples in the FIRST column.")
+    series = df.iloc[:, 0].dropna()
+    examples = [str(x) for x in series.tolist() if str(x).strip()]
+    if not examples:
+        raise ValueError(f"{xlsx_path} has no non-empty examples in the first column.")
+    return examples
+
+
+def _load_dataset() -> Tuple[List[str], List[int]]:
+    texts: List[str] = []
+    labels: List[int] = []
+    for label, path in FILE_MAP.items():
+        samples = _read_first_column(path)
+        texts.extend(samples)
+        labels.extend([label] * len(samples))
+    return texts, labels
+
+
+# ---------------------------
+# Training
+# ---------------------------
+def _make_pipeline() -> Pipeline:
     """
-    Load examples from the first column of an Excel file.
-    If the file cannot be read, returns the default_examples list.
+    Char n-grams are robust to obfuscation, spacing, and mixed case.
+    """
+    vectorizer = TfidfVectorizer(
+        analyzer="char_wb",
+        ngram_range=(3, 5),
+        lowercase=True,
+        min_df=1,
+        max_df=1.0,
+        strip_accents=None,
+        sublinear_tf=True,
+    )
+    clf = LinearSVC()  # fast & strong for text classification
+    return Pipeline([("tfidf", vectorizer), ("clf", clf)])
+
+
+def _train_model() -> Pipeline:
+    texts, labels = _load_dataset()
+
+    # Class weights (balanced) – helpful if classes are imbalanced.
+    classes = np.unique(labels)
+    weights = compute_class_weight(class_weight="balanced", classes=classes, y=labels)
+    class_weight = {int(c): float(w) for c, w in zip(classes, weights)}
+
+    base = _make_pipeline()
+
+    if TUNE:
+        # Lightweight grid – expand if you have more data/time
+        param_grid = {
+            "tfidf__ngram_range": [(3, 5), (2, 5), (3, 6)],
+            "clf__C": [0.5, 1.0, 2.0],
+        }
+        tuned = GridSearchCV(
+            base,
+            param_grid=param_grid,
+            scoring="f1_macro",
+            n_jobs=-1,
+            cv=3,
+            verbose=0,
+        )
+        tuned.fit(texts, labels)
+        model = tuned.best_estimator_
+    else:
+        # Attach class_weight to LinearSVC by refitting a new instance
+        # (Pipeline doesn’t expose clf init; rebuild with same vectorizer)
+        vectorizer = base.named_steps["tfidf"]
+        clf = LinearSVC(C=1.0, class_weight=class_weight)
+        model = Pipeline([("tfidf", vectorizer), ("clf", clf)])
+        model.fit(texts, labels)
+
+    # Persist
+    joblib.dump(
+        {
+            "model": model,
+            "meta": {
+                "version": 2,
+                "classes": sorted(list(set(labels))),
+                "files": FILE_MAP,
+                "tuned": TUNE,
+                "timestamp": time.time(),
+            },
+        },
+        MODEL_PATH,
+    )
+    return model
+
+
+def _load_or_train() -> Pipeline:
+    global _model
+    with _model_lock:
+        if _model is not None:
+            return _model
+
+        needs_train = True
+        if os.path.exists(MODEL_PATH):
+            try:
+                payload = joblib.load(MODEL_PATH)
+                model = payload.get("model", None)
+                meta = payload.get("meta", {})
+                # Basic sanity checks
+                classes = set(meta.get("classes", []))
+                expected = {0, 1, 2, 3}
+                if model is not None and classes == expected:
+                    _model = model
+                    return _model
+            except Exception:
+                # ignore and retrain
+                pass
+
+        if needs_train:
+            _model = _train_model()
+            return _model
+
+
+# ---------------------------
+# Public API
+# ---------------------------
+@rate_limited(MAX_CALLS, PERIOD_SEC)
+def detect_attack(data: str) -> int:
+    """
+    Returns:
+        0 benign, 1 SQLi, 2 XSS, 3 DDoS
     """
     try:
-        df = pd.read_excel(filename)
-        examples = df.iloc[:, 0].dropna().tolist()
-        print(f"Loaded {len(examples)} examples from {filename}")
-        return examples
+        model = _load_or_train()
+        text = "" if data is None else str(data)
+        # Fast path: empty or whitespace-only payloads are benign
+        if not text.strip():
+            return 0
+        return int(model.predict([text])[0])
+    except NotFittedError:
+        # Shouldn't happen due to _load_or_train(), but be safe
+        _train_model()
+        model = _load_or_train()
+        return int(model.predict([str(data)])[0])
     except Exception as e:
-        print(f"Error reading {filename}: {e}. Using default examples.")
-        return default_examples
+        # In production you might log this; default to benign to avoid lockouts
+        # when the detector itself fails.
+        # print(f"[ai_detector] detection error: {e}")
+        return 0
 
-# ---------------------------
-# Model Training
-# ---------------------------
-def train_detector():
-    texts = []
-    labels = []
-    
-    # Benign examples (label 0)
-    default_benign = [
-         "Hello world",
-         "GET /index.html HTTP/1.1",
-         "User login attempt",
-         "Normal data request",
-         "GET /api/data HTTP/1.1",
-         "POST /submit HTTP/1.1",
-         "Welcome to our site",
-         "This is a regular request",
-         "Fetching user profile",
-         "Updating user settings"
-    ]
-    
-    # SQL Injection examples (label 1)
-    default_sqli = [
-         "SELECT * FROM users",
-         "DROP TABLE students; --",
-         "UNION SELECT password FROM admin",
-         "INSERT INTO users VALUES ('malicious')",
-         "SELECT name, password FROM accounts WHERE username='admin' --",
-         "SELECT * FROM orders WHERE id=1; DROP TABLE orders;"
-    ]
-    sqli_examples = load_examples_from_excel("payloads/sqli.xlsx", default_sqli)
-    for text in sqli_examples:
-        texts.append(text)
-        labels.append(1)
-    
-    # XSS examples (label 2)
-    default_xss = [
-         "<script>alert('XSS')</script>",
-         "<img src=x onerror=alert('XSS')>",
-         "<svg onload=alert('XSS')>",
-         "<body onload=alert('XSS')>",
-         "<iframe src='javascript:alert(\"XSS\")'></iframe>",
-         "<div onclick=alert('XSS')>Click me!</div>"
-    ]
-    xss_examples = load_examples_from_excel("payloads/xss.xlsx", default_xss)
-    for text in xss_examples:
-        texts.append(text)
-        labels.append(2)
-    
-    # DDoS examples (simulated via repeated GET requests; label 3)
-    default_ddos = [
-         "GET / " * 50,
-         "GET /api/data " * 40,
-         "GET /index.html " * 60,
-         "GET /home " * 55,
-         "GET /login " * 45
-    ]
-    ddos_examples = load_examples_from_excel("payloads/ddos.xlsx", default_ddos)
-    for text in ddos_examples:
-        texts.append(text)
-        labels.append(3)
-    
-    features = [extract_features(text) for text in texts]
-    clf = RandomForestClassifier(n_estimators=100, random_state=42)
-    clf.fit(features, labels)
-    joblib.dump(clf, 'ai_detector_model.pkl')
-    print("AI Detector model trained and saved as 'ai_detector_model.pkl'")
-    return clf
-
-def load_detector():
-    if os.path.exists('ai_detector_model.pkl'):
-        clf = joblib.load('ai_detector_model.pkl')
-        print("Loaded existing AI Detector model.")
-    else:
-        clf = train_detector()
-    return clf
-
-# ---------------------------
-# Attack Detection with Rate Limit
-# ---------------------------
-@rate_limited(max_calls=100, period=60)  # Allow up to 100 calls per minute
-def detect_attack(data):
-    """
-    Detect the type of attack in the given request data.
-    
-    Returns:
-        0 if benign,
-        1 if SQL Injection,
-        2 if XSS,
-        3 if simulated DDoS.
-    """
-    clf = load_detector()
-    features = extract_features(data)
-    prediction = clf.predict([features])[0]
-    return prediction
 
 if __name__ == "__main__":
-    # When running this module directly, (re)train the model.
-    train_detector()
+    # Quick manual smoke test
+    print("Detector label map: 0=benign, 1=SQLi, 2=XSS, 3=DDoS")
+    print("Loading/training model from XLSX files...")
+    m = _load_or_train()
+    for t in ["Hello", "<script>alert(1)</script>", "SELECT * FROM users", "GET / " * 30]:
+        print(repr(t[:60]), "=>", detect_attack(t))
