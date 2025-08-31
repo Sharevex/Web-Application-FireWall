@@ -7,8 +7,6 @@ Combined Firewall:
 - Network IPS/IDS using Scapy (safe-fallback if unavailable)
 - Blocked IPs persisted in MySQL (via MySQLIPBlocker)
 - Live dashboard & metrics
-
-Author: Sharevex (Ata Sharef)
 """
 
 import os
@@ -19,6 +17,7 @@ import threading
 import logging
 from collections import defaultdict, deque
 from datetime import timedelta
+from threading import Lock
 
 import psutil
 import numpy as np
@@ -27,7 +26,24 @@ from flask import (
     jsonify, session, flash, abort
 )
 
-# Scapy may be unavailable on some hosts; fail soft
+# Paths we don't want to count as "requests" on the dashboard
+EXCLUDED_PATHS = {
+    "/favicon.ico",
+    "/metrics",
+    "/stats",
+    "/top_ips",
+    "/login",
+    "/dashboard",
+}
+def _is_excluded_path(path: str) -> bool:
+    """Exclude static assets and known system/dashboard endpoints from counting."""
+    if path in EXCLUDED_PATHS:
+        return True
+    if path.startswith("/static/"):
+        return True
+    return False
+
+# Scapy soft-fallback
 try:
     from scapy.all import sniff, IP, TCP, Raw
 except Exception as e:
@@ -54,6 +70,7 @@ logging.basicConfig(
 # ---------------------------------------------------------------------------
 current_os = detect_os()
 ip_request_count = defaultdict(int)
+stats_lock = Lock()
 
 class DDoSRateLimiter:
     def __init__(self, time_window=60, max_requests=20):
@@ -94,29 +111,31 @@ db_blocker.start_background_sync()
 # Flask app & session config
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
-
-# IMPORTANT: keep a stable secret key (set via systemd env in production)
 app.secret_key = os.environ.get("APP_SECRET_KEY", "fallback_secret")
 
-# Session/cookie settings: ensure POST->redirect keeps session cookie
 app.config.update(
     SESSION_COOKIE_NAME="fw_session",
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SECURE=False,       # set True if serving over HTTPS
-    SESSION_COOKIE_SAMESITE="Lax",     # works well with redirects on same site
+    SESSION_COOKIE_SECURE=False,       # True if HTTPS
+    SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
 )
 
 # ---------------------------------------------------------------------------
-# Before-request: count & DB-based block
+# Before-request: count + DB block
 # ---------------------------------------------------------------------------
 @app.before_request
 def global_request_check():
     client_ip = request.remote_addr or "unknown"
-    stats.total_requests += 1
-    ip_request_count[client_ip] += 1
+    path = request.path
 
-    # Block check (MySQL)
+    # Count non-excluded requests here (works for allowed & blocked)
+    if not _is_excluded_path(path):
+        with stats_lock:
+            stats.total_requests += 1
+            ip_request_count[client_ip] += 1
+
+    # DB-based blocking
     try:
         active_ips = {ip for ip, _, _ in db_blocker.get_active_blocks()}
     except Exception as e:
@@ -124,11 +143,13 @@ def global_request_check():
         active_ips = set()
 
     if client_ip in active_ips:
+        with stats_lock:
+            stats.blocked_requests += 1
         log_request_details(client_ip, "<BLOCKED>", "denied (in DB)")
         abort(403)
 
 # ---------------------------------------------------------------------------
-# Detection (rule-based + AI)
+# Detection
 # ---------------------------------------------------------------------------
 attack_patterns = {
     "sql_injection": r"(\bSELECT\b|\bUNION\b|\bDROP\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bOR\s+1=1\b|--)",
@@ -142,7 +163,7 @@ def rule_based_detect(data: str):
     return False, None
 
 # ---------------------------------------------------------------------------
-# Network IPS/IDS (soft-fallback if Scapy missing)
+# Network IPS/IDS
 # ---------------------------------------------------------------------------
 def ml_predict(packet) -> bool:
     if packet and packet.haslayer(Raw):
@@ -157,7 +178,8 @@ def ml_predict(packet) -> bool:
 def block_ip(ip: str, reason="Network-level IPS/IDS"):
     try:
         db_blocker.block_ip(ip, reason=reason)
-        stats.network_blocks += 1
+        with stats_lock:
+            stats.network_blocks += 1
     except Exception as e:
         logging.error(f"Error blocking IP {ip} at OS/DB level: {e}")
 
@@ -186,23 +208,15 @@ def get_cpu_usage():
 
 def get_ram_usage():
     m = psutil.virtual_memory()
-    return {
-        "total": round(m.total/(1024**3),2),
-        "used":  round(m.used /(1024**3),2),
-        "free":  round(m.free /(1024**3),2),
-        "percent": m.percent
-    }
+    return {"total": round(m.total/(1024**3),2), "used": round(m.used/(1024**3),2),
+            "free": round(m.free/(1024**3),2), "percent": m.percent}
 
 def get_disk_usage():
     try:
         u = psutil.disk_usage('/')
-        return [{
-            "device":"root","mountpoint":"/",
-            "total":round(u.total/(1024**3),2),
-            "used": round(u.used /(1024**3),2),
-            "free": round(u.free /(1024**3),2),
-            "percent":u.percent
-        }]
+        return [{"device":"root","mountpoint":"/","total":round(u.total/(1024**3),2),
+                 "used": round(u.used /(1024**3),2), "free": round(u.free /(1024**3),2),
+                 "percent":u.percent}]
     except Exception:
         return []
 
@@ -216,13 +230,8 @@ def get_uptime():
 # ---------------------------------------------------------------------------
 @app.route("/metrics")
 def metrics():
-    return jsonify({
-        "cpu": get_cpu_usage(),
-        "ram": get_ram_usage(),
-        "disk": get_disk_usage(),
-        "uptime": get_uptime(),
-        "timestamp": time.time(),
-    })
+    return jsonify({"cpu": get_cpu_usage(), "ram": get_ram_usage(), "disk": get_disk_usage(),
+                    "uptime": get_uptime(), "timestamp": time.time()})
 
 @app.route("/login", methods=["GET","POST"])
 def login():
@@ -231,7 +240,7 @@ def login():
         pw   = request.form.get("password","")
         if secureauth.verify_user(user, pw):
             session["user"] = user
-            session.permanent = True  # keep cookie for PERMANENT_SESSION_LIFETIME
+            session.permanent = True
             flash("Login successful!", "success")
             return redirect(url_for("dashboard"))
         else:
@@ -240,7 +249,6 @@ def login():
 
 @app.route("/dashboard")
 def dashboard():
-    # Log session keys for quick sanity check
     logging.info(f"[dashboard] session keys: {list(session.keys())}")
     if "user" not in session:
         flash("Login required", "error")
@@ -248,12 +256,8 @@ def dashboard():
     top_ips, top_reasons = get_top_blocked_ips_and_reasons()
     return render_template("dashboard.html", top_ips=top_ips, top_reasons=top_reasons)
 
-    
-# ===== add these routes =====
-
 @app.route("/stats")
 def stats_endpoint():
-    """Return live firewall counters for the dashboard."""
     try:
         return jsonify(stats.to_dict())
     except Exception as e:
@@ -262,14 +266,12 @@ def stats_endpoint():
 
 @app.route("/top_ips")
 def top_ips():
-    """Return top talkers (by request count) for the dashboard."""
     try:
         top5 = sorted(ip_request_count.items(), key=lambda kv: kv[1], reverse=True)[:5]
         return jsonify(dict(top5))
     except Exception as e:
         logging.error(f"/top_ips error: {e}")
         return jsonify({"error": "top_ips unavailable"}), 500
-
 
 @app.route("/", defaults={"path":""}, methods=["GET","POST"])
 @app.route("/<path:path>", methods=["GET","POST"])
@@ -278,8 +280,9 @@ def firewall_route(path):
 
     # DDoS limiter
     if ddos_limiter.is_ddos(client_ip):
-        stats.blocked_requests += 1
-        stats.ddos_blocks += 1
+        with stats_lock:
+            stats.blocked_requests += 1
+            stats.ddos_blocks += 1
         reason = "DDoS rate-limit"
         try:
             db_blocker.block_ip(client_ip, reason)
@@ -291,23 +294,23 @@ def firewall_route(path):
     data = request.get_data(as_text=True) or ""
     referer = request.headers.get("Referer","")
 
-    # Allow authenticated users and dashboard refreshes without inspection
     if ('user' in session) or (referer and ('/dashboard' in referer or path in referer)):
-        stats.allowed_requests += 1
+        with stats_lock:
+            stats.allowed_requests += 1
         log_request_details(client_ip, data, "allowed (session/refresh)")
         return jsonify({"status":"allowed","echo":data})
 
-    # Allow simple GETs with no body
     if request.method == "GET" and not data.strip():
-        stats.allowed_requests += 1
+        with stats_lock:
+            stats.allowed_requests += 1
         log_request_details(client_ip, data, "allowed (empty GET)")
         return jsonify({"status":"allowed","echo":data})
 
-    # Rule-based detection
     rb, attack = rule_based_detect(data)
     if rb:
-        stats.blocked_requests += 1
-        stats.rule_based_blocks += 1
+        with stats_lock:
+            stats.blocked_requests += 1
+            stats.rule_based_blocks += 1
         try:
             db_blocker.block_ip(client_ip, attack)
         except Exception as e:
@@ -315,11 +318,11 @@ def firewall_route(path):
         log_request_details(client_ip, data, f"blocked – {attack}")
         return jsonify({"status":"blocked","reason":attack}), 403
 
-    # AI detection
     ai_label = detect_attack(data)
     if ai_label != 0:
-        stats.blocked_requests += 1
-        stats.ai_based_blocks += 1
+        with stats_lock:
+            stats.blocked_requests += 1
+            stats.ai_based_blocks += 1
         reason = {1:"SQLi (AI)", 2:"XSS (AI)", 3:"DDoS (AI)"}.get(ai_label, "Anomaly (AI)")
         try:
             db_blocker.block_ip(client_ip, reason)
@@ -328,8 +331,8 @@ def firewall_route(path):
         log_request_details(client_ip, data, f"blocked – {reason}")
         return jsonify({"status":"blocked","reason":reason}), 403
 
-    # Otherwise allowed
-    stats.allowed_requests += 1
+    with stats_lock:
+        stats.allowed_requests += 1
     log_request_details(client_ip, data, "allowed")
     return jsonify({"status":"allowed","echo":data})
 
@@ -356,9 +359,6 @@ def get_top_blocked_ips_and_reasons(n=5):
 # Main
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Start sniffing in the background (if Scapy available)
     sniff_thread = threading.Thread(target=start_packet_sniffing, daemon=True)
     sniff_thread.start()
-
-    # Run Flask
     app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
