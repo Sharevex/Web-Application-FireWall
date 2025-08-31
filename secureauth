@@ -1,34 +1,42 @@
-import pyodbc
+import mysql.connector
 import hashlib
 import base64
 import traceback
 
-# Trusted Connection for Windows Auth (trustedauth)
-MSSQL_CONN = (
-    'DRIVER={ODBC Driver 17 for SQL Server};'
-    'SERVER=localhost;DATABASE=admin;Trusted_Connection=yes;'
-)
+# MySQL connection config
+MYSQL_CONN = {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "admin",
+    "password": "At@1381928",
+    "database": "admin",
+    "autocommit": True
+}
 
-def hash_password(password):
-    digest = hashlib.sha256(password.encode('utf-8')).digest()
-    return base64.b64encode(digest).decode('utf-8')
+def hash_password(password: str) -> str:
+    """Hash the password (SHA-256 → Base64)"""
+    digest = hashlib.sha256(password.encode("utf-8")).digest()
+    return base64.b64encode(digest).decode("utf-8")
 
-def get_user(username):
+def get_user(username: str):
+    """Fetch (username, password_hash) from DB"""
     try:
-        conn = pyodbc.connect(MSSQL_CONN)
+        conn = mysql.connector.connect(**MYSQL_CONN)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT username, password_hash FROM users WHERE username = ?",
+            "SELECT username, password_hash FROM users WHERE username = %s",
             (username,)
         )
-        user = cursor.fetchone()
+        row = cursor.fetchone()
+        cursor.close()
         conn.close()
-        return user if user else None
+        return row if row else None
     except Exception:
         print("DB error in get_user:\n", traceback.format_exc())
         return None
 
-def verify_user(username, password):
+def verify_user(username: str, password: str) -> bool:
+    """Check if password matches stored hash"""
     user = get_user(username)
     if not user:
         return False
