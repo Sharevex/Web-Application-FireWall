@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AI Detector Module (precise, XLSX-only)
----------------------------------------
+AI Detector Module (precise, XLSX-only) - Linux Compatible
+----------------------------------------------------------
 Trains a multi-class model from ONLY the provided Excel payload files:
 
   payloads/benign.xlsx  -> label 0 (benign)
@@ -89,24 +89,87 @@ def rate_limited(max_calls: int, period: int):
 
 
 # ---------------------------
-# Data Loading (XLSX only)
+# Data Loading (XLSX only) - Linux Compatible
 # ---------------------------
+def _check_excel_engines():
+    """Check which Excel engines are available"""
+    engines = {}
+    
+    try:
+        import openpyxl
+        engines['openpyxl'] = True
+    except ImportError:
+        engines['openpyxl'] = False
+    
+    try:
+        import xlrd
+        engines['xlrd'] = True
+    except ImportError:
+        engines['xlrd'] = False
+        
+    try:
+        import calamine
+        engines['calamine'] = True
+    except ImportError:
+        engines['calamine'] = False
+    
+    return engines
+
+
 def _read_first_column(xlsx_path: str) -> List[str]:
     if not os.path.exists(xlsx_path):
         raise FileNotFoundError(
             f"Required payload file not found: {xlsx_path}\n"
             f"Expected files: {list(FILE_MAP.values())}"
         )
-    try:
-        df = pd.read_excel(xlsx_path)
-    except Exception as e:
-        raise RuntimeError(f"Failed to read {xlsx_path}: {e}")
+
+    # Check available engines
+    engines = _check_excel_engines()
+    
+    # Try engines in order of preference for Linux compatibility
+    engines_to_try = []
+    if engines.get('openpyxl', False):
+        engines_to_try.append('openpyxl')
+    if engines.get('calamine', False):
+        engines_to_try.append('calamine')
+    if engines.get('xlrd', False):
+        engines_to_try.append('xlrd')
+    
+    if not engines_to_try:
+        raise RuntimeError(
+            f"No Excel engines available. Install one of:\n"
+            f"  pip install openpyxl     # Recommended for .xlsx\n"
+            f"  pip install xlrd         # For .xls files\n"
+            f"  pip install python-calamine  # Alternative engine"
+        )
+
+    df = None
+    errors = []
+    
+    for engine in engines_to_try:
+        try:
+            # Explicitly specify engine and read only first column
+            df = pd.read_excel(xlsx_path, engine=engine, usecols=[0])
+            break
+        except Exception as e:
+            errors.append(f"{engine}: {str(e)}")
+            continue
+    
+    if df is None:
+        error_msg = f"Failed to read {xlsx_path} with all available engines:\n"
+        for error in errors:
+            error_msg += f"  - {error}\n"
+        raise RuntimeError(error_msg)
+
     if df.shape[1] < 1:
         raise ValueError(f"{xlsx_path} has no columns. Put examples in the FIRST column.")
+    
     series = df.iloc[:, 0].dropna()
     examples = [str(x) for x in series.tolist() if str(x).strip()]
+    
     if not examples:
         raise ValueError(f"{xlsx_path} has no non-empty examples in the first column.")
+    
     return examples
 
 
@@ -136,7 +199,7 @@ def _make_pipeline() -> Pipeline:
         strip_accents=None,
         sublinear_tf=True,
     )
-    clf = LinearSVC()  # fast & strong for text classification
+    clf = LinearSVC(random_state=42)  # Add random_state for reproducibility
     return Pipeline([("tfidf", vectorizer), ("clf", clf)])
 
 
@@ -155,6 +218,7 @@ def _train_model() -> Pipeline:
         param_grid = {
             "tfidf__ngram_range": [(3, 5), (2, 5), (3, 6)],
             "clf__C": [0.5, 1.0, 2.0],
+            "clf__class_weight": [class_weight],  # Include class_weight in tuning
         }
         tuned = GridSearchCV(
             base,
@@ -168,9 +232,8 @@ def _train_model() -> Pipeline:
         model = tuned.best_estimator_
     else:
         # Attach class_weight to LinearSVC by refitting a new instance
-        # (Pipeline doesn’t expose clf init; rebuild with same vectorizer)
         vectorizer = base.named_steps["tfidf"]
-        clf = LinearSVC(C=1.0, class_weight=class_weight)
+        clf = LinearSVC(C=1.0, class_weight=class_weight, random_state=42)
         model = Pipeline([("tfidf", vectorizer), ("clf", clf)])
         model.fit(texts, labels)
 
@@ -250,6 +313,47 @@ if __name__ == "__main__":
     # Quick manual smoke test
     print("Detector label map: 0=benign, 1=SQLi, 2=XSS, 3=DDoS")
     print("Loading/training model from XLSX files...")
-    m = _load_or_train()
-    for t in ["Hello", "<script>alert(1)</script>", "SELECT * FROM users", "GET / " * 30]:
-        print(repr(t[:60]), "=>", detect_attack(t))
+    
+    # Check Excel engines
+    engines = _check_excel_engines()
+    print("Available Excel engines:")
+    for engine, available in engines.items():
+        status = "✓" if available else "✗"
+        print(f"  {status} {engine}")
+    
+    # Check if payload files exist
+    missing_files = []
+    for label, path in FILE_MAP.items():
+        if not os.path.exists(path):
+            missing_files.append(path)
+    
+    if missing_files:
+        print(f"\nMissing payload files:")
+        for f in missing_files:
+            print(f"  - {f}")
+        print("\nCreate these files first or run the sample creation script.")
+        exit(1)
+    
+    try:
+        m = _load_or_train()
+        print("Model loaded/trained successfully!")
+        
+        # Test cases
+        test_cases = [
+            "Hello", 
+            "<script>alert(1)</script>", 
+            "SELECT * FROM users", 
+            "GET / " * 30
+        ]
+        
+        print("\nTesting detection:")
+        labels = {0: "benign", 1: "SQLi", 2: "XSS", 3: "DDoS"}
+        for t in test_cases:
+            result = detect_attack(t)
+            print(f"{repr(t[:60]):65} => {result} ({labels.get(result, 'unknown')})")
+            
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
