@@ -64,6 +64,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+import re  # Regular expressions for suspicious pattern detection
+
 try:
     import psutil  # type: ignore
 except ImportError:  # pragma: no cover - psutil is strongly recommended
@@ -150,6 +152,63 @@ logging.basicConfig(
 )
 _logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Extended configuration toggles
+#
+# AI detection can be enabled/disabled globally via FW_AI_DETECTION. Individual
+# components (path, query, body, headers) can be toggled via
+# FW_AI_DETECTION_PATH, FW_AI_DETECTION_QUERY, FW_AI_DETECTION_BODY,
+# FW_AI_DETECTION_HEADERS. The default configuration is conservative:
+# body and query inspection enabled, path and header inspection disabled.
+# The number of suspicious parts required to trigger a block is controlled by
+# FW_AI_BLOCK_THRESHOLD (default 2), reducing false positives from a single
+# hit. DDoS protection can be disabled via FW_DDOS_ENABLED. To override
+# proxy headers entirely and always use the remote address, set
+# FW_USE_REMOTE_ADDR=1.
+
+# Whether to perform AI-based inspection at all
+AI_DETECTION_ENABLED: bool = os.environ.get("FW_AI_DETECTION", "1") != "0"
+
+# Component toggles for AI inspection
+AI_DETECTION_PATH: bool = os.environ.get("FW_AI_DETECTION_PATH", "0") != "0"
+AI_DETECTION_QUERY: bool = os.environ.get("FW_AI_DETECTION_QUERY", "1") != "0"
+AI_DETECTION_BODY: bool = os.environ.get("FW_AI_DETECTION_BODY", "1") != "0"
+AI_DETECTION_HEADERS: bool = os.environ.get("FW_AI_DETECTION_HEADERS", "0") != "0"
+
+# Minimum number of malicious components required to block the request.
+# A higher value reduces false positives. Defaults to 2.
+try:
+    AI_BLOCK_THRESHOLD = int(os.environ.get("FW_AI_BLOCK_THRESHOLD", "2"))
+    if AI_BLOCK_THRESHOLD < 1:
+        AI_BLOCK_THRESHOLD = 1
+except Exception:
+    AI_BLOCK_THRESHOLD = 2
+
+# DDoS protection toggle (0 to disable)
+DDOS_ENABLED: bool = os.environ.get("FW_DDOS_ENABLED", "1") != "0"
+
+# If true, ignore all proxy headers and always use Flask's remote_addr for client IP
+USE_REMOTE_ADDR_ONLY: bool = os.environ.get("FW_USE_REMOTE_ADDR", "0") != "0"
+
+# Precompile a suspicious pattern for SQL and XSS keywords. This pattern is used
+# to decide whether to run the AI detector on a given string, preventing
+# unnecessary scans on benign input.
+SUSPICIOUS_PATTERN = re.compile(r"(?i)(select|union|insert|delete|update|drop|script)")
+
+def suspicious_text(text: str) -> bool:
+    """Return True if text contains characters or keywords indicative of an attack.
+
+    A text is considered suspicious if it contains certain metacharacters
+    (angle brackets, quotes, semicolons) or if it matches common SQL/XSS
+    keywords. The AI detector will only be invoked on texts that satisfy
+    this predicate.
+    """
+    # Check for special characters that often denote payload boundaries
+    if any(c in text for c in "<>'\";"):
+        return True
+    # Check for SQL or XSS keywords (case-insensitive)
+    return bool(SUSPICIOUS_PATTERN.search(text))
+
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -181,17 +240,31 @@ def is_excluded_path(path: str) -> bool:
 
 
 def get_client_ip() -> str:
-    """Determine the real client IP, respecting proxy headers if enabled."""
+    """Determine the real client IP address.
+
+    If FW_USE_REMOTE_ADDR is set (USE_REMOTE_ADDR_ONLY is True), proxy
+    headers are ignored entirely and the IP is taken from Flask's
+    `remote_addr`. Otherwise, a series of headers are checked in order
+    of precedence: CF-Connecting-IP (used by Cloudflare), the first
+    address in X-Forwarded-For, then X-Real-IP. As a last resort,
+    `remote_addr` is used. Missing or malformed values fall back to
+    "unknown".
+    """
+    # When explicit override is set, ignore all forwarded headers
+    if USE_REMOTE_ADDR_ONLY:
+        return request.remote_addr or "unknown"
     # Cloudflare header has highest priority
     cf_ip = request.headers.get("CF-Connecting-IP")
     if cf_ip:
         return cf_ip
-    # X-Forwarded-For may contain multiple addresses separated by comma
+    # X-Forwarded-For may contain multiple addresses separated by commas
     xff = request.headers.get("X-Forwarded-For")
     if xff:
-        ip = xff.split(",")[0].strip()
-        if ip:
-            return ip
+        # Choose the first non-empty trimmed value
+        for part in xff.split(','):
+            ip = part.strip()
+            if ip:
+                return ip
     # X-Real-IP if present
     xr = request.headers.get("X-Real-IP")
     if xr:
@@ -493,39 +566,45 @@ def ai_inspect(text: str) -> int:
 
 
 def ai_inspect_all_content(client_ip: str, request_data: str) -> bool:
-    """Inspect all request components and decide if the request is malicious.
+    """Inspect request components using AI and decide if blocking is warranted.
 
-    The following parts are inspected:
-      * Path (`request.path`)
-      * Query string (`request.query_string`)
-      * Request body (`request_data`)
-      * Selected headers (User-Agent, Referer, X-Forwarded-For)
-
-    If any part yields a non-zero result from the AI detector, the request
-    is considered malicious and True is returned. Otherwise, False.
+    This function respects several environment-controlled toggles to reduce
+    false positives. Only strings considered suspicious (via
+    `suspicious_text`) are passed to the AI detector. The number of
+    malicious components required to block is configured via
+    `AI_BLOCK_THRESHOLD`.
     """
-    # Check URL path
-    path = request.path or "/"
-    if ai_inspect(path) != 0:
-        _logger.warning(f"AI detected malicious path from {client_ip}: {path}")
-        return True
-    # Check query parameters
-    query_string = request.query_string.decode("utf-8", errors="ignore")
-    if query_string and ai_inspect(query_string) != 0:
-        _logger.warning(f"AI detected malicious query from {client_ip}: {query_string}")
-        return True
-    # Check request body/data
-    if request_data and ai_inspect(request_data) != 0:
-        _logger.warning(f"AI detected malicious body from {client_ip}: {request_data[:100]}")
-        return True
-    # Check headers for common attack vectors
-    suspicious_headers = ["User-Agent", "Referer", "X-Forwarded-For"]
-    for header_name in suspicious_headers:
-        header_value = request.headers.get(header_name, "")
-        if header_value and ai_inspect(header_value) != 0:
-            _logger.warning(f"AI detected malicious {header_name} from {client_ip}: {header_value}")
-            return True
-    return False
+    # AI completely disabled
+    if not AI_DETECTION_ENABLED:
+        return False
+    malicious_count = 0
+    # Path inspection (optional and only on suspicious paths)
+    if AI_DETECTION_PATH:
+        path = request.path or "/"
+        if suspicious_text(path) and ai_inspect(path) != 0:
+            _logger.warning(f"AI detected malicious path from {client_ip}: {path}")
+            malicious_count += 1
+    # Query string inspection (optional)
+    if AI_DETECTION_QUERY:
+        query_string = request.query_string.decode("utf-8", errors="ignore")
+        if query_string and suspicious_text(query_string) and ai_inspect(query_string) != 0:
+            _logger.warning(f"AI detected malicious query from {client_ip}: {query_string}")
+            malicious_count += 1
+    # Body inspection (optional)
+    if AI_DETECTION_BODY:
+        if request_data and suspicious_text(request_data) and ai_inspect(request_data) != 0:
+            _logger.warning(f"AI detected malicious body from {client_ip}: {request_data[:100]}")
+            malicious_count += 1
+    # Header inspection (optional)
+    if AI_DETECTION_HEADERS:
+        suspicious_headers = ["User-Agent", "Referer", "X-Forwarded-For"]
+        for header_name in suspicious_headers:
+            header_value = request.headers.get(header_name, "")
+            if header_value and suspicious_text(header_value) and ai_inspect(header_value) != 0:
+                _logger.warning(f"AI detected malicious {header_name} from {client_ip}: {header_value}")
+                malicious_count += 1
+    # Block if number of malicious components meets or exceeds threshold
+    return malicious_count >= AI_BLOCK_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
@@ -675,7 +754,16 @@ def get_disk() -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 stats = Stats()
-ddos = DDoSRateLimiter()
+if DDOS_ENABLED:
+    # Standard rate limiter configured via environment
+    ddos = DDoSRateLimiter()
+else:
+    # No-op limiter that never triggers
+    class _NoOpLimiter:
+        def is_ddos(self, ip: str) -> bool:
+            return False
+
+    ddos = _NoOpLimiter()
 
 ip_request_count: Dict[str, int] = defaultdict(int)
 blocked_ip_count: Dict[str, int] = defaultdict(int)
