@@ -282,6 +282,30 @@
       margin-top: 0.5rem;
       opacity: 0.93;
     }
+
+    /* Loading animation */
+    .loading {
+      opacity: 0.6;
+      pointer-events: none;
+    }
+
+    .status-indicator {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 0.5rem;
+    }
+
+    .status-online {
+      background-color: #00ff41;
+      box-shadow: 0 0 8px rgba(0, 255, 65, 0.6);
+    }
+
+    .status-offline {
+      background-color: #ff4757;
+      box-shadow: 0 0 8px rgba(255, 71, 87, 0.6);
+    }
   </style>
 </head>
 
@@ -292,6 +316,7 @@
       <a class="navbar-brand d-flex align-items-center" href="#">
         <span class="emoji-icon me-2" style="font-size: 1.8rem;">🔥</span>
         Firewall Dashboard
+        <span class="status-indicator status-online ms-2" id="connection-status"></span>
       </a>
 
       <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
@@ -417,12 +442,16 @@
       <!-- Top Blocked IPs - Left -->
       <div class="col-12 col-md-6">
         <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-start"
-          style="min-height: 100px;">
+          style="min-height: 150px;">
           <span class="card-title-custom">Top Blocked IPs</span>
           <ul id="top_blocked_ips" class="list-custom w-100">
-            {% for ip in top_ips %}
-            <li>{{ ip }}</li>
-            {% endfor %}
+            {% if top_ips %}
+              {% for ip in top_ips %}
+                <li><span>{{ ip }}</span></li>
+              {% endfor %}
+            {% else %}
+              <li style="color: #666;">No blocked IPs</li>
+            {% endif %}
           </ul>
         </div>
       </div>
@@ -430,12 +459,16 @@
       <!-- Block Reasons - Right -->
       <div class="col-12 col-md-6">
         <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-start"
-          style="min-height: 100px;">
+          style="min-height: 150px;">
           <span class="card-title-custom">Block Reasons</span>
           <ul id="block_reasons" class="list-custom w-100">
-            {% for reason in top_reasons %}
-            <li>{{ reason }}</li>
-            {% endfor %}
+            {% if top_reasons %}
+              {% for reason in top_reasons %}
+                <li><span>{{ reason }}</span></li>
+              {% endfor %}
+            {% else %}
+              <li style="color: #666;">No blocks recorded</li>
+            {% endif %}
           </ul>
         </div>
       </div>
@@ -444,25 +477,25 @@
       <div class="col-12 col-md-6 col-xl-4">
         <div
           class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
-          style="min-height: 100px;">
+          style="min-height: 120px;">
           <span class="card-title-custom">Total Requests</span>
-          <span class="stat-value stat-blue text-shadow-stat" id="total_requests">9</span>
+          <span class="stat-value stat-blue text-shadow-stat" id="total_requests">0</span>
         </div>
       </div>
 
       <div class="col-12 col-md-6 col-xl-4">
         <div
           class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
-          style="min-height: 100px;">
+          style="min-height: 120px;">
           <span class="card-title-custom">Allowed Requests</span>
-          <span class="stat-value stat-green text-shadow-green" id="allowed_requests">9</span>
+          <span class="stat-value stat-green text-shadow-green" id="allowed_requests">0</span>
         </div>
       </div>
 
       <div class="col-12 col-md-6 col-xl-4">
         <div
           class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
-          style="min-height: 100px;">
+          style="min-height: 120px;">
           <span class="card-title-custom">Blocked Requests</span>
           <span class="stat-value stat-red text-shadow-red" id="blocked_requests">0</span>
         </div>
@@ -471,7 +504,7 @@
       <div class="col-12 col-md-6 col-xl-4">
         <div
           class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
-          style="min-height: 100px;">
+          style="min-height: 120px;">
           <span class="card-title-custom">DDoS Blocks</span>
           <span class="stat-value stat-red text-shadow-red" id="ddos_blocks">0</span>
         </div>
@@ -480,7 +513,7 @@
       <div class="col-12 col-md-6 col-xl-4">
         <div
           class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
-          style="min-height: 100px;">
+          style="min-height: 120px;">
           <span class="card-title-custom">AI-based Blocks</span>
           <span class="stat-value stat-violet text-shadow-violet" id="ai_based_blocks">0</span>
         </div>
@@ -489,40 +522,73 @@
       <div class="col-12 col-md-6 col-xl-4">
         <div
           class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
-          style="min-height: 100px;">
+          style="min-height: 120px;">
           <span class="card-title-custom">Uptime</span>
-          <span class="stat-value stat-violet text-shadow-violet" id="uptime">0</span>
+          <span class="stat-value stat-violet text-shadow-violet" id="uptime">0s</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Additional Info Section -->
+    <div class="row g-4 mb-5">
+      <div class="col-12">
+        <div class="card card-custom p-4">
+          <h5 class="card-title-custom mb-3">System Information</h5>
+          <div class="row">
+            <div class="col-md-4">
+              <div class="text-muted-custom">Last Update:</div>
+              <div class="mono-text" id="last_update">Never</div>
+            </div>
+            <div class="col-md-4">
+              <div class="text-muted-custom">Firewall Status:</div>
+              <div class="mono-text" id="firewall_status">Active</div>
+            </div>
+            <div class="col-md-4">
+              <div class="text-muted-custom">Protection Level:</div>
+              <div class="mono-text" id="protection_level">High</div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
 
     <footer class="footer-custom">
-      © 2025 Sharevex Firewall System. Auto-refresh every 5 seconds.
+      © 2025 Sharevex Firewall System.
     </footer>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   <script>
+    // --- CONNECTION STATUS ---
+    let connectionStatus = document.getElementById('connection-status');
+    let lastUpdateElement = document.getElementById('last_update');
+    
+    function updateConnectionStatus(online) {
+      connectionStatus.className = `status-indicator ${online ? 'status-online' : 'status-offline'}`;
+    }
+
+    function updateLastUpdate() {
+      const now = new Date();
+      lastUpdateElement.textContent = now.toLocaleTimeString();
+    }
+
     // --- LOGOUT FUNCTION ---
     function logout() {
       if (confirm('Are you sure you want to logout?')) {
-        // You can customize this to make an API call to your backend
         fetch('/logout', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           }
         }).then(() => {
-          window.location.href = '/login'; // Redirect to login page
+          window.location.href = '/login';
         }).catch(() => {
-          // If the endpoint doesn't exist, just redirect anyway
           window.location.href = '/login';
         });
       }
     }
 
     // --- SYSTEM MONITORING ---
-    // For SVG gauge, 2𝜋r = ~289 (r=46)
     function setGauge(circle, percent) {
       const total = circle.getAttribute('stroke-dasharray') ? parseFloat(circle.getAttribute('stroke-dasharray')) : 289;
       let val = Math.max(0, Math.min(100, percent || 0));
@@ -530,54 +596,105 @@
     }
 
     function updateSystem() {
-      fetch('/metrics').then(r => r.json()).then(data => {
-        // CPU
-        document.getElementById('cpu_percent').textContent = data.cpu.total.toFixed(1) + '%';
-        setGauge(document.getElementById('cpu_circle'), data.cpu.total);
-        document.getElementById('cpu_cores').textContent = data.cpu.cores;
-        // RAM
-        document.getElementById('ram_percent').textContent = data.ram.percent.toFixed(1) + '%';
-        setGauge(document.getElementById('ram_circle'), data.ram.percent);
-        document.getElementById('ram_total').textContent = data.ram.total;
-        document.getElementById('ram_used').textContent = data.ram.used;
-        // Disk (show only first/root partition)
-        if (data.disk && data.disk.length) {
-          const disk = data.disk[0];
-          document.getElementById('disk_percent').textContent = disk.percent.toFixed(1) + '%';
-          setGauge(document.getElementById('disk_circle'), disk.percent);
-          document.getElementById('disk_total').textContent = disk.total;
-          document.getElementById('disk_used').textContent = disk.used;
-        }
-      });
+      fetch('/metrics')
+        .then(r => {
+          if (!r.ok) throw new Error('Network response was not ok');
+          return r.json();
+        })
+        .then(data => {
+          updateConnectionStatus(true);
+          updateLastUpdate();
+          
+          // CPU
+          document.getElementById('cpu_percent').textContent = (data.cpu.total || 0).toFixed(1) + '%';
+          setGauge(document.getElementById('cpu_circle'), data.cpu.total || 0);
+          document.getElementById('cpu_cores').textContent = data.cpu.cores || '-';
+          
+          // RAM
+          document.getElementById('ram_percent').textContent = (data.ram.percent || 0).toFixed(1) + '%';
+          setGauge(document.getElementById('ram_circle'), data.ram.percent || 0);
+          document.getElementById('ram_total').textContent = data.ram.total || '--';
+          document.getElementById('ram_used').textContent = data.ram.used || '--';
+          
+          // Disk
+          if (data.disk && data.disk.length > 0) {
+            const disk = data.disk[0];
+            document.getElementById('disk_percent').textContent = (disk.percent || 0).toFixed(1) + '%';
+            setGauge(document.getElementById('disk_circle'), disk.percent || 0);
+            document.getElementById('disk_total').textContent = disk.total || '-';
+            document.getElementById('disk_used').textContent = disk.used || '-';
+          }
+          
+          // Update uptime from metrics
+          if (data.uptime && data.uptime.formatted) {
+            document.getElementById('uptime').textContent = data.uptime.formatted;
+          }
+        })
+        .catch(err => {
+          console.error('Failed to fetch /metrics:', err);
+          updateConnectionStatus(false);
+        });
     }
-    // --- FIREWALL ---
+
+    // --- FIREWALL STATS ---
     function updateFirewall() {
       fetch('/stats')
-        .then(r => r.json())
-        .then(data => {
-          // existing metrics
-          document.getElementById('total_requests').textContent = data.total_requests ?? 'N/A';
-          document.getElementById('allowed_requests').textContent = data.allowed_requests ?? 'N/A';
-          document.getElementById('blocked_requests').textContent = data.blocked_requests ?? 'N/A';
-          document.getElementById('ddos_blocks').textContent = data.ddos_blocks ?? 'N/A';
-          document.getElementById('ai_based_blocks').textContent = data.ai_based_blocks ?? 'N/A';
-
-          // Top Blocked IPs
+        .then(r => {
+          if (!r.ok) throw new Error('Network response was not ok');
+          return r.json();
         })
-        .catch(err => console.error('Failed to fetch /stats:', err));
+        .then(data => {
+          // Update all firewall metrics with fallback to 0
+          document.getElementById('total_requests').textContent = data.total_requests ?? 0;
+          document.getElementById('allowed_requests').textContent = data.allowed_requests ?? 0;
+          document.getElementById('blocked_requests').textContent = data.blocked_requests ?? 0;
+          document.getElementById('ddos_blocks').textContent = data.ddos_blocks ?? 0;
+          document.getElementById('ai_based_blocks').textContent = data.ai_based_blocks ?? 0;
+          
+          // Update uptime with multiple fallback options
+          if (data.uptime_formatted) {
+            document.getElementById('uptime').textContent = data.uptime_formatted;
+          } else if (data.uptime && data.uptime.formatted) {
+            document.getElementById('uptime').textContent = data.uptime.formatted;
+          } else if (data.uptime_hms) {
+            document.getElementById('uptime').textContent = data.uptime_hms;
+          }
+        })
+        .catch(err => {
+          console.error('Failed to fetch /stats:', err);
+          updateConnectionStatus(false);
+        });
     }
 
-    function updateMetrics() {
-      fetch('/metrics')
-        .then(response => response.json())
-        .then(data => {
-          if (data.uptime && data.uptime.formatted) {
-            document.getElementById('uptime').innerText = data.uptime.formatted;
-          }
-          // Optionally update other stats here (cpu, ram, etc.)
+    // --- UPDATE TOP BLOCKED IPs ---
+    function updateTopBlocked() {
+      fetch('/top_ips')
+        .then(r => {
+          if (!r.ok) throw new Error('Network response was not ok');
+          return r.json();
         })
-        .catch(error => {
-          console.error('Error fetching metrics:', error);
+        .then(data => {
+          const topIpsList = document.getElementById('top_blocked_ips');
+          if (topIpsList) {
+            topIpsList.innerHTML = '';
+            const entries = Object.entries(data).slice(0, 5);
+            if (entries.length === 0) {
+              topIpsList.innerHTML = '<li style="color: #666;">No blocked IPs</li>';
+            } else {
+              entries.forEach(([ip, count]) => {
+                const li = document.createElement('li');
+                li.innerHTML = `<span>${ip}</span><span class="percent">${count}</span>`;
+                topIpsList.appendChild(li);
+              });
+            }
+          }
+        })
+        .catch(err => {
+          console.error('Failed to fetch top IPs:', err);
+          const topIpsList = document.getElementById('top_blocked_ips');
+          if (topIpsList) {
+            topIpsList.innerHTML = '<li style="color: #ff4757;">Failed to load</li>';
+          }
         });
     }
 
@@ -595,12 +712,37 @@
       });
     });
 
-    // --- INIT ---
-    updateMetrics();
-    updateSystem();
-    updateFirewall();
-    setInterval(updateSystem, 1000);
-    setInterval(updateFirewall, 5000);
+    // --- ERROR HANDLING ---
+    window.addEventListener('error', function(e) {
+      console.error('JavaScript error:', e.error);
+    });
+
+    // --- INITIALIZATION ---
+    document.addEventListener('DOMContentLoaded', function() {
+      console.log('Dashboard initializing...');
+      
+      // Initial load
+      updateSystem();
+      updateFirewall();
+      updateTopBlocked();
+      
+      // Set up intervals
+      setInterval(updateSystem, 2000);     // Update system metrics every 2 seconds
+      setInterval(updateFirewall, 5000);   // Update firewall stats every 5 seconds
+      setInterval(updateTopBlocked, 10000); // Update top blocked IPs every 10 seconds
+      
+      console.log('Dashboard initialized successfully');
+    });
+
+    // --- VISIBILITY CHANGE HANDLING ---
+    document.addEventListener('visibilitychange', function() {
+      if (!document.hidden) {
+        // Page became visible, refresh data immediately
+        updateSystem();
+        updateFirewall();
+        updateTopBlocked();
+      }
+    });
   </script>
 </body>
 
