@@ -2,85 +2,109 @@
 """
 firewall.py
 -----------
-Combined Firewall:
-- Web firewall (Flask) with DDoS prevention, AI/rule-based detection
-- Network IPS/IDS using Scapy (safe-fallback if unavailable)
-- Blocked IPs persisted in MySQL (via MySQLIPBlocker)
-- Live dashboard & metrics
+- Precise request counters (dashboard refreshes INCLUDED)
+- DDoS limiter (env-tunable), AI inspection for ALL attacks
+- Network IPS/IDS via Scapy (soft fallback)
+- MySQL-backed IP blocking (MySQLIPBlocker) + OS-level auto-expiring blocks
+- JSON endpoints: /stats, /top_ips, /metrics
+
+ENV knobs (optional):
+  FW_BLOCK_TTL=300            # default block TTL in seconds (DB + OS set) [default 300 = 5 min]
+  FW_DDOS_WINDOW=60           # seconds window for DDoS rate limiter
+  FW_DDOS_MAX=20              # max requests per window per IP
+  FW_TRUST_PROXY=1            # 1 to trust one proxy hop via ProxyFix; 0 to disable
+  FW_OS_MODE=auto             # 'auto' | 'nft' | 'ipset' | 'off'
 """
 
 import os
-import sys
 import re
 import time
-import threading
 import logging
-from collections import defaultdict, deque
+import threading
+import shutil
+import subprocess
 from datetime import timedelta
+from collections import defaultdict, deque
 from threading import Lock
 
 import psutil
-import numpy as np
 from flask import (
-    Flask, render_template, request, redirect, url_for,
-    jsonify, session, flash, abort
+    Flask, request, jsonify, render_template,
+    redirect, url_for, flash, session, abort, g
 )
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-# Paths we don't want to count as "requests" on the dashboard
+# ---------------- Config ---------------- #
+BLOCK_TTL_SECONDS = int(os.environ.get("FW_BLOCK_TTL", "300"))  # 5 minutes default
+OS_MODE = os.environ.get("FW_OS_MODE", "auto").lower()          # auto | nft | ipset | off
+
+# -------- Exclusions (not counted in totals) --------
 EXCLUDED_PATHS = {
     "/favicon.ico",
+    "/robots.txt",
+    "/health",
+    "/healthz",
     "/metrics",
     "/stats",
     "/top_ips",
-    "/login",
-    "/dashboard",
+    "/login",  # keep login out of totals; remove if you want it counted
+    "/logout",  # Add logout to excluded paths
 }
-def _is_excluded_path(path: str) -> bool:
-    """Exclude static assets and known system/dashboard endpoints from counting."""
+def is_excluded_path(path: str) -> bool:
     if path in EXCLUDED_PATHS:
         return True
     if path.startswith("/static/"):
         return True
     return False
 
-# Scapy soft-fallback
+# -------- Scapy (soft fallback) --------
 try:
-    from scapy.all import sniff, IP, TCP, Raw
+    from scapy.all import sniff, IP, Raw
 except Exception as e:
     sniff = None
-    IP = TCP = Raw = None
+    IP = Raw = None
     print("[firewall] ⚠ Scapy not available:", e)
 
-import secureauth
-from ai_detector import detect_attack
+# -------- Local deps --------
 from ip_blocker_db import MySQLIPBlocker
+from ai_detector import detect_attack
+import secureauth
 from os_detection import detect_os
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
+# -------- Logging --------
 logging.basicConfig(
     filename="firewall.log",
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-# ---------------------------------------------------------------------------
-# Globals
-# ---------------------------------------------------------------------------
-current_os = detect_os()
-ip_request_count = defaultdict(int)
-stats_lock = Lock()
+# -------- Helpers: real client IP behind proxies/Cloudflare --------
+def get_client_ip() -> str:
+    cf = request.headers.get("CF-Connecting-IP")
+    if cf:
+        return cf
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        ip = xff.split(",")[0].strip()
+        if ip:
+            return ip
+    xr = request.headers.get("X-Real-IP")
+    if xr:
+        return xr
+    return request.remote_addr or "unknown"
 
+# -------- DDoS limiter (env-tunable) --------
 class DDoSRateLimiter:
-    def __init__(self, time_window=60, max_requests=20):
+    def __init__(self, time_window=None, max_requests=None):
+        time_window = time_window or int(os.environ.get("FW_DDOS_WINDOW", "60"))
+        max_requests = max_requests or int(os.environ.get("FW_DDOS_MAX", "20"))
         self.time_window = time_window
         self.max_requests = max_requests
-        self.requests_log = defaultdict(deque)
+        self._log = defaultdict(deque)  # ip -> deque[timestamps]
 
     def is_ddos(self, ip: str) -> bool:
         now = time.time()
-        dq = self.requests_log[ip]
+        dq = self._log[ip]
         while dq and dq[0] < now - self.time_window:
             dq.popleft()
         if len(dq) >= self.max_requests:
@@ -88,54 +112,176 @@ class DDoSRateLimiter:
         dq.append(now)
         return False
 
-class FirewallStats:
+# -------- Stats (thread-safe) - REMOVED rule_based_blocks --------
+class Stats:
     def __init__(self):
+        self._lock = Lock()
         self.total_requests = 0
         self.allowed_requests = 0
         self.blocked_requests = 0
         self.ddos_blocks = 0
-        self.rule_based_blocks = 0
         self.ai_based_blocks = 0
         self.network_blocks = 0
+
+    def _inc(self, field: str, n: int = 1):
+        with self._lock:
+            setattr(self, field, getattr(self, field) + n)
+
+    def total(self):   self._inc("total_requests")
+    def allowed(self): self._inc("allowed_requests")
+    def blocked(self): self._inc("blocked_requests")
+    def bump(self, field: str): self._inc(field)
+
     def to_dict(self):
-        return self.__dict__
+        with self._lock:
+            return {
+                "total_requests": self.total_requests,
+                "allowed_requests": self.allowed_requests,
+                "blocked_requests": self.blocked_requests,
+                "ddos_blocks": self.ddos_blocks,
+                "ai_based_blocks": self.ai_based_blocks,
+                "network_blocks": self.network_blocks,
+            }
 
-ddos_limiter = DDoSRateLimiter()
-stats = FirewallStats()
+# -------- Helper function to format uptime --------
+def format_uptime(seconds):
+    """Format uptime seconds into human readable string"""
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        minutes = seconds // 60
+        secs = seconds % 60
+        return f"{minutes}m {secs}s"
+    elif seconds < 86400:
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        return f"{hours}h {minutes}m"
+    else:
+        days = seconds // 86400
+        hours = (seconds % 86400) // 3600
+        return f"{days}d {hours}h"
 
-# DB-backed IP blocker (MySQL)
-db_blocker = MySQLIPBlocker(default_ttl_seconds=86400, sync_interval_sec=30)
+# -------- Globals --------
+current_os = detect_os()
+ddos = DDoSRateLimiter()
+stats = Stats()
+
+# FIXED: Separate tracking for blocked IPs vs all requests
+ip_request_count = defaultdict(int)      # All IP requests (for general stats)
+blocked_ip_count = defaultdict(int)      # Only blocked IPs (for top blocked display)
+ipcount_lock = Lock()
+
+# MySQL-backed blocker
+db_blocker = MySQLIPBlocker(default_ttl_seconds=BLOCK_TTL_SECONDS, sync_interval_sec=30)
 db_blocker.start_background_sync()
 
-# ---------------------------------------------------------------------------
-# Flask app & session config
-# ---------------------------------------------------------------------------
+# -------- Flask --------
 app = Flask(__name__)
 app.secret_key = os.environ.get("APP_SECRET_KEY", "fallback_secret")
-
 app.config.update(
     SESSION_COOKIE_NAME="fw_session",
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SECURE=False,       # True if HTTPS
+    SESSION_COOKIE_SECURE=False,     # set True behind HTTPS/terminator
     SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
 )
 
-# ---------------------------------------------------------------------------
-# Before-request: count + DB block
-# ---------------------------------------------------------------------------
-@app.before_request
-def global_request_check():
-    client_ip = request.remote_addr or "unknown"
-    path = request.path
+# Trust one proxy hop by default (disable with FW_TRUST_PROXY=0)
+if os.environ.get("FW_TRUST_PROXY", "1") != "0":
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
-    # Count non-excluded requests here (works for allowed & blocked)
-    if not _is_excluded_path(path):
-        with stats_lock:
-            stats.total_requests += 1
+# -------- OS-level enforcement (ipset/nft) --------
+OS_METHOD = "off"  # resolved at runtime: 'nft', 'ipset', 'off'
+
+def have(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
+
+def setup_os_enforcement(ttl_seconds: int):
+    """Pick and prepare an OS enforcement backend with per-entry auto-expiry."""
+    global OS_METHOD
+    mode = OS_MODE
+    if mode == "off":
+        OS_METHOD = "off"
+        logging.info("OS enforcement disabled (FW_OS_MODE=off).")
+        return
+
+    # auto-detect
+    if mode == "auto":
+        if have("nft"):
+            mode = "nft"
+        elif have("ipset") and have("iptables"):
+            mode = "ipset"
+        else:
+            mode = "off"
+
+    if mode == "nft":
+        if not have("nft"):
+            logging.warning("nft not available; falling back to ipset/iptables if present.")
+        else:
+            script = f"""
+            add table inet filter
+            add set inet filter fw_blocked {{ type ipv4_addr; timeout {ttl_seconds}s; flags timeout; }}
+            add chain inet filter input {{ type filter hook input priority 0; policy accept; }}
+            add rule inet filter input ip saddr @fw_blocked drop
+            """
+            subprocess.run(["nft", "-f", "-"], input=script.encode(), check=False)
+            OS_METHOD = "nft"
+            logging.info(f"OS enforcement: nftables set fw_blocked with timeout {ttl_seconds}s")
+            return
+
+    if mode == "ipset":
+        if not (have("ipset") and have("iptables")):
+            logging.warning("ipset/iptables not available; OS enforcement disabled.")
+            OS_METHOD = "off"
+            return
+        subprocess.run(["ipset", "create", "fw_blocked", "hash:ip", "timeout", str(ttl_seconds), "-exist"], check=False)
+        # ensure iptables rule exists
+        probe = subprocess.run(["iptables", "-C", "INPUT", "-m", "set", "--match-set", "fw_blocked", "src", "-j", "DROP"])
+        if probe.returncode != 0:
+            subprocess.run(["iptables", "-I", "INPUT", "1", "-m", "set", "--match-set", "fw_blocked", "src", "-j", "DROP"], check=False)
+        OS_METHOD = "ipset"
+        logging.info(f"OS enforcement: ipset+iptables with timeout {ttl_seconds}s")
+        return
+
+    OS_METHOD = "off"
+    logging.info("OS enforcement not enabled (no supported backend found).")
+
+def os_enforce_add(ip: str, ttl_seconds: int):
+    """Add IP to the OS-level block set with TTL."""
+    if OS_METHOD == "nft" and have("nft"):
+        # add element with per-entry timeout
+        cmd = ["nft", "add", "element", "inet", "filter", "fw_blocked", f"{ip} timeout {ttl_seconds}s"]
+        subprocess.run(cmd, check=False)
+    elif OS_METHOD == "ipset" and have("ipset"):
+        subprocess.run(["ipset", "add", "fw_blocked", ip, "timeout", str(ttl_seconds), "-exist"], check=False)
+    else:
+        # OS enforcement off or unavailable
+        pass
+
+# FIXED: Helper function to track blocked IPs
+def track_blocked_ip(ip: str):
+    """Track an IP that was blocked (separate from general request tracking)"""
+    with ipcount_lock:
+        blocked_ip_count[ip] += 1
+
+# Initialize OS enforcement with the same TTL as DB
+setup_os_enforcement(BLOCK_TTL_SECONDS)
+
+# -------- Before-request: COUNT ONCE + DB block --------
+@app.before_request
+def before_every_request():
+    path = request.path or "/"
+    client_ip = get_client_ip()
+
+    g.allowed_counted = False  # prevent double-bumps
+
+    # 1) Count every non-excluded request exactly once
+    if not is_excluded_path(path):
+        stats.total()
+        with ipcount_lock:
             ip_request_count[client_ip] += 1
 
-    # DB-based blocking
+    # 2) Deny if IP is DB-blocked
     try:
         active_ips = {ip for ip, _, _ in db_blocker.get_active_blocks()}
     except Exception as e:
@@ -143,222 +289,305 @@ def global_request_check():
         active_ips = set()
 
     if client_ip in active_ips:
-        with stats_lock:
-            stats.blocked_requests += 1
-        log_request_details(client_ip, "<BLOCKED>", "denied (in DB)")
+        stats.blocked()
+        track_blocked_ip(client_ip)  # FIXED: Track as blocked IP
+        log_request(client_ip, "<BLOCKED>", "denied (in DB)")
         abort(403)
 
-# ---------------------------------------------------------------------------
-# Detection
-# ---------------------------------------------------------------------------
-attack_patterns = {
-    "sql_injection": r"(\bSELECT\b|\bUNION\b|\bDROP\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bOR\s+1=1\b|--)",
-    "xss":           r"(<script>|alert\(|onerror=)",
-    "path_traversal": r"(\.\./|\b/etc/passwd\b)",
-}
-def rule_based_detect(data: str):
-    for attack, pattern in attack_patterns.items():
-        if re.search(pattern, data, re.IGNORECASE):
-            return True, attack
-    return False, None
+# -------- After-request: classify allowed exactly once --------
+@app.after_request
+def classify_allowed(response):
+    if not is_excluded_path(request.path or "/"):
+        sc = response.status_code
+        if (200 <= sc < 300 or sc == 304) and not g.allowed_counted:
+            stats.allowed()
+            g.allowed_counted = True
+    return response
 
-# ---------------------------------------------------------------------------
-# Network IPS/IDS
-# ---------------------------------------------------------------------------
-def ml_predict(packet) -> bool:
+# -------- AI detection wrapper (safer logging) --------
+def ai_inspect(text: str) -> int:
+    try:
+        code = detect_attack(text)
+        logging.info(f"ai_detector returned {code}")
+        return int(code) if code is not None else 0
+    except Exception as e:
+        logging.error(f"ai_detector error: {e}")
+        return 0
+
+# -------- AI inspection for ALL endpoints --------
+def ai_inspect_all_content(client_ip: str, request_data: str) -> bool:
+    """
+    Use AI detector for ALL content inspection.
+    Returns True if should block, False if should allow.
+    """
+    # Check URL path
+    path = request.path or "/"
+    if ai_inspect(path) != 0:
+        logging.warning(f"AI detected malicious path from {client_ip}: {path}")
+        return True
+    
+    # Check query parameters
+    query_string = request.query_string.decode('utf-8', errors='ignore')
+    if query_string and ai_inspect(query_string) != 0:
+        logging.warning(f"AI detected malicious query from {client_ip}: {query_string}")
+        return True
+    
+    # Check request body/data
+    if request_data and ai_inspect(request_data) != 0:
+        logging.warning(f"AI detected malicious body from {client_ip}: {request_data[:100]}...")
+        return True
+    
+    # Check headers for common attack vectors
+    suspicious_headers = ['User-Agent', 'Referer', 'X-Forwarded-For']
+    for header_name in suspicious_headers:
+        header_value = request.headers.get(header_name, '')
+        if header_value and ai_inspect(header_value) != 0:
+            logging.warning(f"AI detected malicious {header_name} from {client_ip}: {header_value}")
+            return True
+    
+    return False
+
+# -------- Network IPS/IDS (Scapy) - UPDATED to use AI --------
+def ai_predict_packet(packet) -> bool:
+    """Use AI detector for packet inspection"""
     if packet and packet.haslayer(Raw):
         try:
             payload = packet[Raw].load.decode("utf-8", errors="ignore")
-            if any(kw in payload.upper() for kw in ("DROP TABLE", "SELECT * FROM", "OR 1=1")):
-                return True
-        except Exception as exc:
-            logging.error(f"Payload decode error: {exc}")
+            return ai_inspect(payload) != 0
+        except Exception as e:
+            logging.error(f"payload decode error: {e}")
     return False
 
-def block_ip(ip: str, reason="Network-level IPS/IDS"):
+def network_enforce_block(ip: str, reason: str):
     try:
         db_blocker.block_ip(ip, reason=reason)
-        with stats_lock:
-            stats.network_blocks += 1
+        os_enforce_add(ip, BLOCK_TTL_SECONDS)
+        track_blocked_ip(ip)  # FIXED: Track as blocked IP
+        stats.bump("network_blocks")
     except Exception as e:
-        logging.error(f"Error blocking IP {ip} at OS/DB level: {e}")
+        logging.error(f"OS/DB block error for {ip}: {e}")
 
 def process_packet(packet):
-    if not (packet and packet.haslayer(IP)):
+    if not (packet and IP and packet.haslayer(IP)):
         return
-    src_ip = packet[IP].src
-    if ml_predict(packet):
-        logging.warning(f"Network malicious packet from {src_ip}")
-        block_ip(src_ip)
+    if ai_predict_packet(packet):
+        src = packet[IP].src
+        logging.warning(f"Network AI detected malicious packet from {src}")
+        network_enforce_block(src, "Network-level AI detection")
 
-def start_packet_sniffing():
+def start_sniffer():
     if not sniff:
-        logging.warning("Scapy not available – sniffing disabled.")
+        logging.warning("Scapy unavailable; disabling sniffing.")
         return
     try:
         sniff(filter="ip", prn=process_packet, store=0)
     except Exception as e:
-        logging.error(f"Sniffing failed: {e}")
+        logging.error(f"sniffing error: {e}")
 
-# ---------------------------------------------------------------------------
-# System Metrics
-# ---------------------------------------------------------------------------
-def get_cpu_usage():
-    return {"total": psutil.cpu_percent(interval=1), "cores": psutil.cpu_count(logical=True)}
+# -------- System metrics --------
+psutil.cpu_percent(None)  # prime so interval=None is non-blocking
 
-def get_ram_usage():
+def get_cpu():
+    return {"total": psutil.cpu_percent(interval=None), "cores": psutil.cpu_count(logical=True)}
+
+def get_ram():
     m = psutil.virtual_memory()
-    return {"total": round(m.total/(1024**3),2), "used": round(m.used/(1024**3),2),
-            "free": round(m.free/(1024**3),2), "percent": m.percent}
+    return {
+        "total": round(m.total/(1024**3), 2),
+        "used":  round(m.used /(1024**3), 2),
+        "free":  round(m.free /(1024**3), 2),
+        "percent": m.percent,
+    }
 
-def get_disk_usage():
+def get_disk():
     try:
-        u = psutil.disk_usage('/')
-        return [{"device":"root","mountpoint":"/","total":round(u.total/(1024**3),2),
-                 "used": round(u.used /(1024**3),2), "free": round(u.free /(1024**3),2),
-                 "percent":u.percent}]
+        u = psutil.disk_usage("/")
+        return [{
+            "device": "root", "mountpoint": "/",
+            "total": round(u.total/(1024**3), 2),
+            "used":  round(u.used /(1024**3), 2),
+            "free":  round(u.free /(1024**3), 2),
+            "percent": u.percent,
+        }]
     except Exception:
         return []
 
 def get_uptime():
-    boot = psutil.boot_time()
-    secs = int(time.time() - boot)
-    return {"uptime_seconds": secs}
+    bt = psutil.boot_time()
+    uptime_secs = int(time.time() - bt)
+    return {
+        "uptime_seconds": uptime_secs,
+        "formatted": format_uptime(uptime_secs)  # Add formatted version
+    }
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
+# -------- Routes --------
 @app.route("/metrics")
 def metrics():
-    return jsonify({"cpu": get_cpu_usage(), "ram": get_ram_usage(), "disk": get_disk_usage(),
-                    "uptime": get_uptime(), "timestamp": time.time()})
+    up = get_uptime()
+    cpu = get_cpu()
+    ram = get_ram()
+    disk = get_disk()
+    # Include snake_case and camelCase keys for UI compatibility
+    return jsonify({
+        "cpu": cpu,
+        "ram": ram,
+        "disk": disk,
+        "uptime": up,  # This now includes both uptime_seconds and formatted
+        "uptime_seconds": up["uptime_seconds"],
+        "uptimeSeconds": up["uptime_seconds"],  # alias
+        "ts": time.time(),
+    })
 
-@app.route("/login", methods=["GET","POST"])
+@app.route("/stats")
+def stats_json():
+    s = stats.to_dict()
+    up = get_uptime()
+    s["uptime"] = up
+    s["uptime_seconds"] = up["uptime_seconds"]
+    
+    # COMPREHENSIVE ALIASES for frontend compatibility
+    # DDoS blocks
+    ddos_count = s.get("ddos_blocks", 0)
+    s["ddosBlocks"] = ddos_count
+    s["ddos_blocks"] = ddos_count
+    s["DDoSBlocks"] = ddos_count
+    
+    # AI-based blocks  
+    ai_count = s.get("ai_based_blocks", 0)
+    s["aiBasedBlocks"] = ai_count
+    s["ai_based_blocks"] = ai_count  
+    s["aiBlocks"] = ai_count
+    s["AIBlocks"] = ai_count
+    s["ai_blocks"] = ai_count
+    
+    # Network blocks
+    net_count = s.get("network_blocks", 0)
+    s["networkBlocks"] = net_count
+    s["network_blocks"] = net_count
+    
+    s["uptimeSeconds"] = up["uptime_seconds"]
+    s["uptime_hms"] = f"{up['uptime_seconds']//3600}h {(up['uptime_seconds']%3600)//60}m {up['uptime_seconds']%60}s"
+    s["uptime_formatted"] = up["formatted"]  # Add formatted version
+    
+    # Config info
+    s["ddosConfig"] = {"window": ddos.time_window, "max": ddos.max_requests}
+    s["osEnforcement"] = {"mode": OS_METHOD, "ttl": BLOCK_TTL_SECONDS}
+    
+    return jsonify(s)
+
+# FIXED: Return actual blocked IPs instead of all request IPs
+@app.route("/top_ips")
+def top_ips():
+    with ipcount_lock:
+        # Return top 5 BLOCKED IPs, not all requesting IPs
+        top5_blocked = sorted(blocked_ip_count.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    return jsonify(dict(top5_blocked))
+
+# OPTIONAL: Add endpoint for general request statistics
+@app.route("/top_requesting_ips")
+def top_requesting_ips():
+    """Show top requesting IPs (including legitimate ones)"""
+    with ipcount_lock:
+        top5_requests = sorted(ip_request_count.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    return jsonify(dict(top5_requests))
+
+@app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        user = request.form.get("username","")
-        pw   = request.form.get("password","")
-        if secureauth.verify_user(user, pw):
-            session["user"] = user
+        u = request.form.get("username", "")
+        p = request.form.get("password", "")
+        if secureauth.verify_user(u, p):
+            session["user"] = u
             session.permanent = True
             flash("Login successful!", "success")
             return redirect(url_for("dashboard"))
-        else:
-            flash("Invalid credentials", "error")
+        flash("Invalid credentials", "error")
     return render_template("login.html")
+
+# ADD MISSING LOGOUT ROUTE
+@app.route("/logout", methods=["POST", "GET"])
+def logout():
+    session.clear()
+    flash("Logged out successfully!", "success")
+    return redirect(url_for("login"))
 
 @app.route("/dashboard")
 def dashboard():
-    logging.info(f"[dashboard] session keys: {list(session.keys())}")
     if "user" not in session:
         flash("Login required", "error")
         return redirect(url_for("login"))
-    top_ips, top_reasons = get_top_blocked_ips_and_reasons()
-    return render_template("dashboard.html", top_ips=top_ips, top_reasons=top_reasons)
+    ips, reasons = get_top_blocked(n=5)
+    return render_template("dashboard.html", top_ips=ips, top_reasons=reasons)
 
-@app.route("/stats")
-def stats_endpoint():
-    try:
-        return jsonify(stats.to_dict())
-    except Exception as e:
-        logging.error(f"/stats error: {e}")
-        return jsonify({"error": "stats unavailable"}), 500
-
-@app.route("/top_ips")
-def top_ips():
-    try:
-        top5 = sorted(ip_request_count.items(), key=lambda kv: kv[1], reverse=True)[:5]
-        return jsonify(dict(top5))
-    except Exception as e:
-        logging.error(f"/top_ips error: {e}")
-        return jsonify({"error": "top_ips unavailable"}), 500
-
-@app.route("/", defaults={"path":""}, methods=["GET","POST"])
-@app.route("/<path:path>", methods=["GET","POST"])
+@app.route("/", defaults={"path": ""}, methods=["GET", "POST"])
+@app.route("/<path:path>", methods=["GET", "POST"])
 def firewall_route(path):
-    client_ip = request.remote_addr or "unknown"
+    client_ip = get_client_ip()
+    body = request.get_data(cache=False, as_text=True) or ""
+    referer = request.headers.get("Referer", "") or ""
 
-    # DDoS limiter
-    if ddos_limiter.is_ddos(client_ip):
-        with stats_lock:
-            stats.blocked_requests += 1
-            stats.ddos_blocks += 1
+    # DDoS limiter applies to all non-excluded hits (already counted in before_request)
+    if not is_excluded_path(request.path or "/") and ddos.is_ddos(client_ip):
+        stats.blocked()
+        stats.bump("ddos_blocks")
+        track_blocked_ip(client_ip)  # FIXED: Track as blocked IP
         reason = "DDoS rate-limit"
+        # block at DB + OS with same TTL
         try:
-            db_blocker.block_ip(client_ip, reason)
+            db_blocker.block_ip(client_ip, reason=reason)
+            os_enforce_add(client_ip, BLOCK_TTL_SECONDS)
         except Exception as e:
-            logging.error(f"Error adding rate-limited IP {client_ip} to DB: {e}")
-        log_request_details(client_ip, "<rate-limited>", reason)
-        return jsonify({"status":"blocked","reason":reason}), 429
+            logging.error(f"DDoS block OS/DB error for {client_ip}: {e}")
+        log_request(client_ip, "<rate-limited>", reason)
+        return jsonify({"status": "blocked", "reason": reason}), 429
 
-    data = request.get_data(as_text=True) or ""
-    referer = request.headers.get("Referer","")
+    # Allow only empty GET refreshes from the dashboard without inspection
+    if ("user" in session or "/dashboard" in referer) and request.method == "GET" and not body.strip():
+        log_request(client_ip, body, "allowed (admin/refresh GET)")
+        return jsonify({"status": "allowed", "echo": body})
 
-    if ('user' in session) or (referer and ('/dashboard' in referer or path in referer)):
-        with stats_lock:
-            stats.allowed_requests += 1
-        log_request_details(client_ip, data, "allowed (session/refresh)")
-        return jsonify({"status":"allowed","echo":data})
-
-    if request.method == "GET" and not data.strip():
-        with stats_lock:
-            stats.allowed_requests += 1
-        log_request_details(client_ip, data, "allowed (empty GET)")
-        return jsonify({"status":"allowed","echo":data})
-
-    rb, attack = rule_based_detect(data)
-    if rb:
-        with stats_lock:
-            stats.blocked_requests += 1
-            stats.rule_based_blocks += 1
+    # AI inspection for ALL content (path, query, body, headers)
+    if ai_inspect_all_content(client_ip, body):
+        stats.blocked()
+        stats.bump("ai_based_blocks")
+        track_blocked_ip(client_ip)  # FIXED: Track as blocked IP
+        
+        # Determine the specific type of attack detected
+        ai_code = ai_inspect(body) or ai_inspect(request.path or "/") or ai_inspect(request.query_string.decode('utf-8', errors='ignore'))
+        reason = {1: "SQLi (AI)", 2: "XSS (AI)", 3: "DDoS (AI)"}.get(ai_code, "Malicious Content (AI)")
+        
         try:
-            db_blocker.block_ip(client_ip, attack)
+            db_blocker.block_ip(client_ip, reason=reason)
+            os_enforce_add(client_ip, BLOCK_TTL_SECONDS)
         except Exception as e:
-            logging.error(f"Error blocking IP {client_ip} (rule): {e}")
-        log_request_details(client_ip, data, f"blocked – {attack}")
-        return jsonify({"status":"blocked","reason":attack}), 403
+            logging.error(f"AI block OS/DB error for {client_ip}: {e}")
+        log_request(client_ip, body, f"blocked – {reason}")
+        return jsonify({"status": "blocked", "reason": reason}), 403
 
-    ai_label = detect_attack(data)
-    if ai_label != 0:
-        with stats_lock:
-            stats.blocked_requests += 1
-            stats.ai_based_blocks += 1
-        reason = {1:"SQLi (AI)", 2:"XSS (AI)", 3:"DDoS (AI)"}.get(ai_label, "Anomaly (AI)")
-        try:
-            db_blocker.block_ip(client_ip, reason)
-        except Exception as e:
-            logging.error(f"Error blocking IP {client_ip} (AI): {e}")
-        log_request_details(client_ip, data, f"blocked – {reason}")
-        return jsonify({"status":"blocked","reason":reason}), 403
+    # Allowed (normal pass)
+    log_request(client_ip, body, "allowed")
+    return jsonify({"status": "allowed", "echo": body})
 
-    with stats_lock:
-        stats.allowed_requests += 1
-    log_request_details(client_ip, data, "allowed")
-    return jsonify({"status":"allowed","echo":data})
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def log_request_details(ip, data, result):
+# -------- Helpers --------
+def log_request(ip: str, data: str, result: str):
     try:
-        with open("firewall.log","a", encoding="utf-8") as f:
+        with open("firewall.log", "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {ip} - {result} - {data}\n")
     except Exception as e:
-        logging.error(f"Log write error: {e}")
+        logging.error(f"log write error: {e}")
 
-def get_top_blocked_ips_and_reasons(n=5):
+def get_top_blocked(n=5):
     try:
-        active = db_blocker.get_active_blocks()
+        active = db_blocker.get_active_blocks()  # [(ip, reason, expires_at), ...]
         recent = sorted(active, key=lambda x: x[2], reverse=True)[:n]
-        return [ip for ip, _, _ in recent], [reason for _, reason, _ in recent]
+        ips = [ip for ip, _, _ in recent]
+        reasons = [reason for _, reason, _ in recent]
+        return ips, reasons
     except Exception as e:
-        logging.error(f"Error reading top blocked IPs: {e}")
+        logging.error(f"read top blocked error: {e}")
         return [], []
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# -------- Main --------
 if __name__ == "__main__":
-    sniff_thread = threading.Thread(target=start_packet_sniffing, daemon=True)
-    sniff_thread.start()
+    threading.Thread(target=start_sniffer, daemon=True).start()
     app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
