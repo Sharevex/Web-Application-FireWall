@@ -4,7 +4,6 @@ AI Detector Module (precise, XLSX-only) - Linux Compatible
 ----------------------------------------------------------
 Trains a multi-class model from ONLY the provided Excel payload files:
 
-  payloads/benign.xlsx  -> label 0 (benign)
   payloads/sqli.xlsx    -> label 1 (SQLi)
   payloads/xss.xlsx     -> label 2 (XSS)
   payloads/ddos.xlsx    -> label 3 (DDoS)
@@ -19,7 +18,7 @@ Model:
 
 API:
   - detect_attack(data: str) -> int
-        0 = benign, 1 = SQLi, 2 = XSS, 3 = DDoS
+        1 = SQLi, 2 = XSS, 3 = DDoS
 
 Operational niceties:
   - Thread-safe lazy loading/training
@@ -48,7 +47,6 @@ import numpy as np
 # ---------------------------
 PAYLOAD_DIR = os.environ.get("AI_PAYLOAD_DIR", "payloads")
 FILE_MAP = {
-    0: os.path.join(PAYLOAD_DIR, "benign.xlsx"),
     1: os.path.join(PAYLOAD_DIR, "sqli.xlsx"),
     2: os.path.join(PAYLOAD_DIR, "xss.xlsx"),
     3: os.path.join(PAYLOAD_DIR, "ddos.xlsx"),
@@ -288,12 +286,11 @@ def _load_or_train() -> Pipeline:
 def detect_attack(data: str) -> int:
     """
     Returns:
-        0 benign, 1 SQLi, 2 XSS, 3 DDoS
+        1 SQLi, 2 XSS, 3 DDoS
     """
     try:
         model = _load_or_train()
         text = "" if data is None else str(data)
-        # Fast path: empty or whitespace-only payloads are benign
         if not text.strip():
             return 0
         return int(model.predict([text])[0])
@@ -303,7 +300,6 @@ def detect_attack(data: str) -> int:
         model = _load_or_train()
         return int(model.predict([str(data)])[0])
     except Exception as e:
-        # In production you might log this; default to benign to avoid lockouts
         # when the detector itself fails.
         # print(f"[ai_detector] detection error: {e}")
         return 0
@@ -311,7 +307,7 @@ def detect_attack(data: str) -> int:
 
 if __name__ == "__main__":
     # Quick manual smoke test
-    print("Detector label map: 0=benign, 1=SQLi, 2=XSS, 3=DDoS")
+    print("Detector label map: 1=SQLi, 2=XSS, 3=DDoS")
     print("Loading/training model from XLSX files...")
     
     # Check Excel engines
@@ -347,7 +343,7 @@ if __name__ == "__main__":
         ]
         
         print("\nTesting detection:")
-        labels = {0: "benign", 1: "SQLi", 2: "XSS", 3: "DDoS"}
+        labels = { 1: "SQLi", 2: "XSS", 3: "DDoS"}
         for t in test_cases:
             result = detect_attack(t)
             print(f"{repr(t[:60]):65} => {result} ({labels.get(result, 'unknown')})")
