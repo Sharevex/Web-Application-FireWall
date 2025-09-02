@@ -14,33 +14,21 @@
       --dark-bg:#181d26; --card-bg:rgba(24,29,38,.95); --border-dark:#233043;
       --text-primary:#d6e3f3; --text-secondary:#a7c7e7; --text-muted:#b9c9d5;
       --accent-blue:#54aaff; --navbar-bg:rgba(18,23,32,.98);
-      --c-allowed:#5bbcff;   /* lines/bars */
-      --c-blocked:#ff6b81;
-      --c-total:#aee2ff;     /* bright total number */
-      --grid:#2b3b52;
+      --c-allowed:#5bbcff; --c-blocked:#ff6b81; --c-total:#aee2ff; --grid:#2b3b52;
     }
 
     html,body{background:radial-gradient(ellipse at top left,#232b3b 30%,#181d26 90%);color:var(--text-primary)}
     body{font-family:'Segoe UI',Arial,sans-serif;margin:0;min-height:100vh;padding-top:80px}
 
-    /* Navbar */
     .navbar-custom{background:var(--navbar-bg);backdrop-filter:blur(10px);border-bottom:1.5px solid var(--border-dark);box-shadow:0 2px 20px rgba(0,0,0,.3)}
     .navbar-brand{color:var(--accent-blue)!important;font-weight:700;font-size:1.4rem;letter-spacing:.03em;text-shadow:0 2px 12px rgba(84,170,255,.3)}
-    .navbar-brand:hover{color:#7bb8ff!important;text-shadow:0 2px 16px rgba(84,170,255,.5);transition:all .3s ease}
     .navbar-nav .nav-link{color:var(--text-secondary)!important;font-weight:600;padding:.5rem 1rem!important;border-radius:.5rem;transition:all .25s ease}
-    .navbar-nav .nav-link:hover{color:var(--text-primary)!important;background-color:rgba(84,170,255,.1);transform:translateY(-1px)}
     .navbar-nav .nav-link.active{color:var(--text-primary)!important;background-color:rgba(84,170,255,.16)}
-    .dropdown-menu{background:var(--card-bg);border:1.5px solid var(--border-dark)}
-    .dropdown-item{color:var(--text-primary)} .dropdown-item:hover{background:rgba(84,170,255,.12)}
-    .navbar-toggler{border-color:rgba(255,255,255,.25)}
-    .navbar-toggler-icon{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3E%3Cpath stroke='rgba(255,255,255,.85)' stroke-linecap='round' stroke-width='2' d='M4 7h22M4 15h22M4 23h22'/%3E%3C/svg%3E")}
 
-    /* Cards */
     .card-custom{background:var(--card-bg);border:1.5px solid var(--border-dark);border-radius:1rem;box-shadow:0 4px 32px rgba(30,41,59,.27)}
     .card-title-custom{color:#cfe0ff;font-size:1.125rem;font-weight:700;letter-spacing:.02em;margin-bottom:.5rem}
     .badge-soft{background:#18355f;border:1px solid #2f63a6;color:#e6f0ff}
 
-    /* Summary cards */
     .summary-card{min-height:170px}
     .summary-card .label{color:#f4f9ff}
     .summary-card .stat-value{font-size:1.8rem;font-weight:900;color:#f7fbff;text-shadow:0 0 6px rgba(255,255,255,.06)}
@@ -48,14 +36,13 @@
     .summary-card .text-success{color:#34e27a!important;text-shadow:0 0 10px rgba(52,226,122,.12)}
     .summary-card .text-danger{color:var(--c-blocked)!important;text-shadow:0 0 10px rgba(255,107,129,.12)}
 
-    /* Charts (medium sized; never balloon) */
     .chart-wrap{position:relative;height:260px}
-    .chart-wrap--bar{position:relative;height:240px}
+    .chart-wrap--bar{position:relative;height:260px}
     .chart-wrap canvas{position:absolute;inset:0;width:100%!important;height:100%!important}
+    .empty-msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#9fb4d4;opacity:.9;font-weight:600}
   </style>
 </head>
 <body>
-  <!-- Navbar -->
   <nav class="navbar navbar-expand-lg navbar-dark fixed-top navbar-custom">
     <div class="container-fluid">
       <a class="navbar-brand d-flex align-items-center" href="{{ url_for('dashboard') }}">
@@ -135,21 +122,30 @@
           <div class="card-title-custom d-flex justify-content-between align-items-center">
             <span>Traffic over time</span><small class="text-muted">Allowed vs Blocked</small>
           </div>
-          <div class="chart-wrap"><canvas id="chart_timeseries"></canvas></div>
+          <div class="chart-wrap">
+            <canvas id="chart_timeseries"></canvas>
+            <div class="empty-msg d-none" id="ts_empty">No data in selected range</div>
+          </div>
         </div>
       </div>
 
       <div class="col-12 col-lg-6">
         <div class="card card-custom p-3">
           <div class="card-title-custom">Top Blocked IPs</div>
-          <div class="chart-wrap chart-wrap--bar"><canvas id="chart_top_ips"></canvas></div>
+          <div class="chart-wrap chart-wrap--bar">
+            <canvas id="chart_top_ips"></canvas>
+            <div class="empty-msg d-none" id="ips_empty">No blocked IPs</div>
+          </div>
         </div>
       </div>
 
       <div class="col-12 col-lg-6">
         <div class="card card-custom p-3">
           <div class="card-title-custom">Top Block Reasons</div>
-          <div class="chart-wrap chart-wrap--bar"><canvas id="chart_top_reasons"></canvas></div>
+          <div class="chart-wrap chart-wrap--bar">
+            <canvas id="chart_top_reasons"></canvas>
+            <div class="empty-msg d-none" id="reasons_empty">No block reasons</div>
+          </div>
         </div>
       </div>
     </div>
@@ -157,8 +153,10 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <!-- Data labels for bars -->
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
   <script>
-    // Chart sizing
+    Chart.register(ChartDataLabels);
     Chart.defaults.responsive = true;
     Chart.defaults.maintainAspectRatio = false;
 
@@ -170,15 +168,13 @@
     let rangeHours = 24;
     let tsChart, topIpsChart, topReasonsChart;
 
-    // --- Color helpers
     const cssVar = (name, fb) => (getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fb);
     const HEX = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i;
-    function rgba(hex, a){
-      const m = HEX.exec(hex);
-      if(!m) return `rgba(255,255,255,${a})`;
+    const rgba = (hex, a) => {
+      const m = HEX.exec(hex); if(!m) return `rgba(255,255,255,${a})`;
       const r = parseInt(m[1],16), g = parseInt(m[2],16), b = parseInt(m[3],16);
       return `rgba(${r},${g},${b},${a})`;
-    }
+    };
     function makeGradient(ctx2d, color){
       const h = (ctx2d.canvas && ctx2d.canvas.clientHeight) || 260;
       const g = ctx2d.createLinearGradient(0, 0, 0, h);
@@ -187,18 +183,13 @@
       return g;
     }
 
-    // --- Prettify reason without changing layout
     function prettifyReason(raw) {
       if (!raw || raw === '(none)') return '—';
       let s = String(raw).trim();
-
-      // prefix handling
       let prefix = '';
       if (s.toLowerCase().startsWith('ai:'))   { prefix = 'AI: ';   s = s.slice(3); }
       if (s.toLowerCase().startsWith('rule:')) { prefix = 'Rule: '; s = s.slice(5); }
-
       s = s.replace(/_/g, ' ').trim();
-
       const map = {
         'db active block': 'Active DB Block',
         'manual block': 'Manual Block',
@@ -213,13 +204,12 @@
         'path traversal': 'Path Traversal',
         'xss': 'XSS',
       };
-
       const key = s.toLowerCase();
       const pretty = map[key] || s.replace(/\b\w/g, c => c.toUpperCase());
       return prefix + pretty;
     }
 
-    // --- Charts (2D context)
+    // ——— Charts ———
     function lineChart(canvasEl, labels, allowed, blocked){
       const ctx2d = canvasEl.getContext('2d');
       const allowedColor = cssVar('--c-allowed', '#5bbcff');
@@ -229,88 +219,101 @@
 
       return new Chart(ctx2d,{
         type:'line',
-        data:{
-          labels,
+        data:{ labels,
           datasets:[
-            {label:'Allowed', data:allowed,
-             borderColor: allowedColor,
-             backgroundColor:gAllowed, fill:true, borderWidth:2, tension:.25,
-             pointRadius:2, pointHoverRadius:5, pointHitRadius:8, pointBorderWidth:0},
-            {label:'Blocked', data:blocked,
-             borderColor: blockedColor,
-             backgroundColor:gBlocked, fill:true, borderWidth:2, tension:.25,
-             pointRadius:2, pointHoverRadius:5, pointHitRadius:8, pointBorderWidth:0}
+            {label:'Allowed', data:allowed, borderColor:allowedColor, backgroundColor:gAllowed,
+             fill:true, borderWidth:2, tension:.25, pointRadius:0, pointHitRadius:8},
+            {label:'Blocked', data:blocked, borderColor:blockedColor, backgroundColor:gBlocked,
+             fill:true, borderWidth:2, tension:.25, pointRadius:0, pointHitRadius:8}
           ]
         },
         options:{
-          resizeDelay:0, animation:false,
-          interaction:{mode:'index',intersect:false},
+          animation:false, interaction:{mode:'index',intersect:false},
           plugins:{
-            legend:{ labels:{ color:'#e6f0ff', usePointStyle:true, pointStyle:'circle' } },
+            legend:{ labels:{ color:'#e6f0ff', usePointStyle:true, pointStyle:'line' } },
             tooltip:{
-              backgroundColor:'rgba(8,12,20,.9)',
-              titleColor:'#eaf2ff', bodyColor:'#dfeaff',
+              backgroundColor:'rgba(8,12,20,.9)', titleColor:'#eaf2ff', bodyColor:'#dfeaff',
               callbacks:{
-                title: items => items[0]?.label || '',
-                label: c => `${c.dataset.label}: ${num(c.parsed.y)}`
+                label: c => `${c.dataset.label}: ${num(c.parsed.y)}`,
+                footer: items => {
+                  const sum = items.reduce((a,i)=>a+(i.parsed.y||0),0);
+                  return `Total: ${num(sum)}`;
+                }
               }
             }
           },
           scales:{
             x:{ ticks:{color:'#cfe0ff'}, grid:{color:'rgba(255,255,255,.06)'} },
-            y:{ ticks:{color:'#cfe0ff'}, grid:{color:'rgba(255,255,255,.06)'}, beginAtZero:true }
-          },
-          elements:{ line:{ capBezierPoints:true } }
+            y:{ ticks:{color:'#cfe0ff'}, grid:{color:'rgba(255,255,255,.06)'}, beginAtZero:true, precision:0 }
+          }
         }
       });
     }
 
-    function barChart(canvasEl, labels, label, data, color){
+    function truncateLabel(s, max=28){
+      s = String(s ?? '');
+      return s.length>max ? s.slice(0,max-1)+'…' : s;
+    }
+
+    function barChart(canvasEl, rawLabels, label, data, color){
       const ctx2d = canvasEl.getContext('2d');
+      const labels = rawLabels.map(truncateLabel);
+
+      // avoid 0→1 span for single bar: pad suggestedMax
+      const maxVal = Math.max(...(data.length?data:[0]));
+      const pad = maxVal === 0 ? 1 : Math.max(1, Math.ceil(maxVal * 0.2));
+
       return new Chart(ctx2d,{
         type:'bar',
         data:{ labels, datasets:[{
           label, data,
           backgroundColor: rgba(color, .25),
           borderColor: color,
-          borderWidth: 1.2,
-          borderRadius: 6,
-          barPercentage:.85,
-          categoryPercentage:.8
+          borderWidth: 1.4,
+          borderRadius: 8,
+          barThickness: 18,
+          maxBarThickness: 24,
         }]},
         options:{
           indexAxis:'y',
           animation:false,
+          layout:{ padding:{ right: 8 } },
           plugins:{
             legend:{ display:false },
             tooltip:{
-              backgroundColor:'rgba(8,12,20,.9)',
-              titleColor:'#eaf2ff', bodyColor:'#dfeaff',
-              callbacks:{ label: c => `${c.label}: ${num(c.raw)}` }
+              backgroundColor:'rgba(8,12,20,.9)', titleColor:'#eaf2ff', bodyColor:'#dfeaff',
+              callbacks:{ 
+                title: (items)=> rawLabels[items[0].dataIndex] ?? items[0].label,
+                label: c => `${num(c.raw)}`
+              }
+            },
+            datalabels:{
+              anchor:'end', align:'end',
+              offset:4,
+              color:'#e9f2ff',
+              formatter:(v)=> num(v),
+              clip:true
             }
           },
           scales:{
-            x:{ ticks:{color:'#cfe0ff'}, grid:{color:'rgba(255,255,255,.08)'}, beginAtZero:true },
+            x:{ ticks:{color:'#cfe0ff'}, grid:{color:'rgba(255,255,255,.08)'}, beginAtZero:true,
+                suggestedMax: maxVal + pad, precision:0 },
             y:{ ticks:{color:'#e6f0ff'}, grid:{color:'rgba(255,255,255,.03)'} }
           }
         }
       });
     }
 
-    // --- Data loaders
+    // ——— Data ———
     async function loadSummary(){
       const r = await fetch('/api/statistics/summary'); 
       const j = await r.json();
-
       $('#overall_total').textContent   = num(j.overall.total);
       $('#overall_allowed').textContent = num(j.overall.allowed);
       $('#overall_blocked').textContent = num(j.overall.blocked);
-
       $('#day_total').textContent       = num(j.last_24h.total);
       $('#day_allowed').textContent     = num(j.last_24h.allowed);
       $('#day_blocked').textContent     = num(j.last_24h.blocked);
-
-      // Top reason prettified + keep raw as tooltip
       const rawReason = j.top_reason_24h.reason;
       const pretty    = prettifyReason(rawReason);
       $('#top_reason').textContent       = pretty;
@@ -319,28 +322,27 @@
     }
 
     function ensureNonEmptySeries(labels, allowed, blocked){
-      if (labels.length) return {labels, allowed, blocked};
+      if (labels.length) return {labels, allowed, blocked, empty:false};
       const now = Math.floor(Date.now()/1000);
       const bucket = rangeHours<=1 ? 10 : (rangeHours<=24 ? 60 : 900);
       const pts = 10;
       const lbls = [];
       for (let i=pts-1;i>=0;i--) lbls.push(fmtTime(now - i*bucket));
       const zeros = Array(pts).fill(0);
-      return {labels: lbls, allowed: zeros, blocked: zeros};
+      return {labels: lbls, allowed: zeros, blocked: zeros, empty:true};
     }
 
     async function loadTimeSeries(){
-      const bucket = rangeHours<=1 ? 10 : (rangeHours<=24 ? 60 : 900); // 10s, 1m, 15m
+      const bucket = rangeHours<=1 ? 10 : (rangeHours<=24 ? 60 : 900);
       const r = await fetch(`/api/statistics/timeseries?hours=${rangeHours}&bucket_sec=${bucket}`);
       const j = await r.json();
-
       let labels  = j.points.map(p=>fmtTime(p.t));
       let allowed = j.points.map(p=>p.allowed);
       let blocked = j.points.map(p=>p.blocked);
-      ({labels, allowed, blocked} = ensureNonEmptySeries(labels, allowed, blocked));
-
+      const filled = ensureNonEmptySeries(labels, allowed, blocked);
+      $('#ts_empty').classList.toggle('d-none', !filled.empty);
       if (tsChart) tsChart.destroy();
-      tsChart = lineChart($('#chart_timeseries'), labels, allowed, blocked);
+      tsChart = lineChart($('#chart_timeseries'), filled.labels, filled.allowed, filled.blocked);
       tsChart.resize();
     }
 
@@ -354,8 +356,11 @@
 
       const ipLabels = ips.items.map(x=>x.key);
       const ipData   = ips.items.map(x=>x.count);
-      const reasonLabels = reasons.items.map(x=>x.key);
+      const reasonLabels = reasons.items.map(x=>prettifyReason(x.key));
       const reasonData   = reasons.items.map(x=>x.count);
+
+      $('#ips_empty').classList.toggle('d-none', ipData.length>0);
+      $('#reasons_empty').classList.toggle('d-none', reasonData.length>0);
 
       if (topIpsChart) topIpsChart.destroy();
       if (topReasonsChart) topReasonsChart.destroy();
@@ -377,7 +382,6 @@
       await Promise.all([loadSummary(), loadTimeSeries(), loadTops()]);
     }
 
-    // Range buttons
     $$('.btn-group [data-range]').forEach(btn=>{
       btn.addEventListener('click', ()=>{
         $$('.btn-group [data-range]').forEach(b=>b.classList.remove('active'));
@@ -387,14 +391,12 @@
       });
     });
 
-    // Resize hygiene
     window.addEventListener('resize', ()=>{
       tsChart && tsChart.resize();
       topIpsChart && topIpsChart.resize();
       topReasonsChart && topReasonsChart.resize();
     });
 
-    // Init + periodic refresh
     refreshAll();
     setInterval(refreshAll, 30000);
   </script>
