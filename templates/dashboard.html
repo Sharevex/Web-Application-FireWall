@@ -2,11 +2,16 @@
 <html lang="en">
 
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
   <title>Firewall Dashboard</title>
+
+  <!-- Bootstrap CSS -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <!-- Bootstrap Icons -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+
   <style>
     :root {
       --dark-bg: #181d26;
@@ -28,148 +33,91 @@
       font-family: 'Segoe UI', Arial, sans-serif;
       color: var(--text-primary);
       margin: 0;
-      padding: 0;
       min-height: 100vh;
-      padding-top: 80px; /* Account for fixed navbar */
+      padding-top: 80px;
+      /* fixed navbar offset */
     }
 
-    /* Navbar Styles */
+    /* Navbar */
     .navbar-custom {
       background: var(--navbar-bg);
       backdrop-filter: blur(10px);
       border-bottom: 1.5px solid var(--border-dark);
-      box-shadow: 0 2px 20px rgba(0, 0, 0, 0.3);
+      box-shadow: 0 2px 20px rgba(0, 0, 0, .3);
     }
 
     .navbar-brand {
       color: var(--accent-blue) !important;
       font-weight: 700;
       font-size: 1.4rem;
-      letter-spacing: 0.03em;
-      text-shadow: 0 2px 12px rgba(84, 170, 255, 0.3);
+      letter-spacing: .03em;
+      text-shadow: 0 2px 12px rgba(84, 170, 255, .3);
     }
 
     .navbar-brand:hover {
       color: #7bb8ff !important;
-      text-shadow: 0 2px 16px rgba(84, 170, 255, 0.5);
-      transition: all 0.3s ease;
+      text-shadow: 0 2px 16px rgba(84, 170, 255, .5);
+      transition: all .3s ease;
     }
+
+    /* already likely present; just in case */
+    .navbar-nav .nav-link.active {
+      color: var(--text-primary) !important;
+      background-color: rgba(84, 170, 255, .16);
+    }
+
 
     .navbar-nav .nav-link {
       color: var(--text-secondary) !important;
       font-weight: 500;
-      padding: 0.5rem 1rem !important;
-      border-radius: 0.5rem;
-      transition: all 0.3s ease;
+      padding: .5rem 1rem !important;
+      border-radius: .5rem;
+      transition: all .3s ease;
     }
 
     .navbar-nav .nav-link:hover {
       color: var(--text-primary) !important;
-      background-color: rgba(84, 170, 255, 0.1);
+      background-color: rgba(84, 170, 255, .1);
       transform: translateY(-1px);
     }
 
     .btn-logout {
       background: linear-gradient(135deg, #ff4757, #ff3838);
       border: none;
-      color: white;
+      color: #fff;
       font-weight: 600;
-      padding: 0.5rem 1.2rem;
-      border-radius: 0.5rem;
-      transition: all 0.3s ease;
-      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+      padding: .5rem 1.2rem;
+      border-radius: .5rem;
     }
 
     .btn-logout:hover {
-      background: linear-gradient(135deg, #ff3838, #ff2f2f);
-      transform: translateY(-1px);
-      box-shadow: 0 4px 15px rgba(255, 71, 87, 0.3);
-      color: white;
+      filter: brightness(1.05);
     }
 
-    .navbar-toggler {
-      border: 1px solid var(--border-dark);
-      padding: 0.3rem 0.6rem;
-    }
-
-    .navbar-toggler:focus {
-      box-shadow: none;
-    }
-
-    .navbar-toggler-icon {
-      background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3e%3cpath stroke='rgba%28214, 227, 243, 0.8%29' stroke-linecap='round' stroke-miterlimit='10' stroke-width='2' d='m4 7h22M4 15h22M4 23h22'/%3e%3c/svg%3e");
-    }
-
-    /* Existing styles */
-    .gauge-fg {
-      stroke-linecap: round;
-      transition: stroke-dashoffset 0.8s cubic-bezier(.73, 1.8, .25, 1);
-    }
-
-    .text-shadow-blue {
-      text-shadow: 0 2px 18px rgba(35, 129, 255, 0.39), 0 0 1px #233, 0 0 2px #233;
-    }
-
-    .text-shadow-emoji {
-      filter: drop-shadow(0 0 8px rgba(255, 153, 0, 0.87));
-    }
-
-    .text-shadow-gauge {
-      text-shadow: 0 0 4px rgba(0, 216, 255, 0.2), 0 1.5px 4px rgba(16, 16, 51, 1);
-    }
-
-    .text-shadow-mono {
-      filter: drop-shadow(0 2px 8px rgba(0, 204, 255, 0.47));
-    }
-
-    .text-shadow-stat {
-      text-shadow: 0 0 14px rgba(2, 156, 252, 0.23);
-    }
-
-    .text-shadow-green {
-      text-shadow: 0 0 10px rgba(113, 255, 191, 0.38);
-    }
-
-    .text-shadow-red {
-      text-shadow: 0 0 10px rgba(251, 96, 126, 0.4);
-    }
-
-    .text-shadow-yellow {
-      text-shadow: 0 0 8px rgba(255, 230, 8, 0.32);
-    }
-
-    .text-shadow-violet {
-      text-shadow: 0 0 8px rgba(230, 97, 233, 0.51);
-    }
-
-    .main-title {
-      color: var(--accent-blue);
-      font-weight: 900;
-      letter-spacing: 0.05em;
-    }
-
-    .emoji-icon {
-      filter: drop-shadow(0 0 8px rgba(255, 153, 0, 0.87));
-    }
-
+    /* Cards + Gauges */
     .card-custom {
       background: var(--card-bg);
       border: 1.5px solid var(--border-dark);
-      box-shadow: 0 4px 32px rgba(30, 41, 59, 0.27);
+      box-shadow: 0 4px 32px rgba(30, 41, 59, .27);
       border-radius: 1rem;
     }
 
     .card-hover:hover {
       transform: translateY(-4px) scale(1.012);
-      box-shadow: 0 8px 42px rgba(8, 95, 158, 0.23), 0 3px 24px rgba(0, 0, 0, 0.5);
-      transition: all 0.25s cubic-bezier(0.5, 2.5, 0.4, 0.85);
+      box-shadow: 0 8px 42px rgba(8, 95, 158, .23), 0 3px 24px rgba(0, 0, 0, .5);
+      transition: all .25s cubic-bezier(.5, 2.5, .4, .85);
+    }
+
+    .gauge-fg {
+      stroke-linecap: round;
+      transition: stroke-dashoffset .8s cubic-bezier(.73, 1.8, .25, 1);
     }
 
     .gauge-container {
       width: 115px;
       height: 115px;
       position: relative;
-      margin: 0 auto 1rem auto;
+      margin: 0 auto 1rem;
     }
 
     .gauge-text {
@@ -187,14 +135,14 @@
       color: #92abef;
       font-size: 1.125rem;
       font-weight: 600;
-      letter-spacing: 0.02em;
-      margin-bottom: 0.5rem;
+      letter-spacing: .02em;
+      margin-bottom: .5rem;
     }
 
     .stat-value {
       font-size: 2rem;
       font-weight: 900;
-      letter-spacing: 0.06em;
+      letter-spacing: .06em;
       margin: 0;
       word-break: break-all;
     }
@@ -215,13 +163,6 @@
       color: #c661e9;
     }
 
-    .mono-text {
-      font-family: 'Segoe UI Mono', monospace;
-      color: #8ed1fc;
-      min-width: 2.25rem;
-      display: inline-block;
-    }
-
     .list-custom {
       list-style: none;
       padding: 0;
@@ -230,9 +171,9 @@
     }
 
     .list-custom li {
-      font-size: 0.875rem;
+      font-size: .875rem;
       color: var(--text-muted);
-      margin: 0.25rem 0;
+      margin: .25rem 0;
       display: flex;
       justify-content: space-between;
       font-family: 'Segoe UI Mono', monospace;
@@ -247,502 +188,393 @@
       text-align: right;
     }
 
-    .list-custom li .ip,
-    .list-custom li .reason {
-      flex: 1;
-      padding-left: 0.5rem;
-      word-break: break-all;
-    }
-
-    .footer-custom {
-      text-align: center;
-      font-size: 0.96rem;
-      margin-top: 3rem;
-      color: #7e8ea8;
-      opacity: 0.65;
-      letter-spacing: 0.01em;
+    .mono-text {
+      font-family: 'Segoe UI Mono', monospace;
+      color: #8ed1fc;
+      min-width: 2.25rem;
+      display: inline-block;
     }
 
     .container-custom {
       max-width: 1100px;
-      margin: 0 auto;
-      margin-top: 2.25rem;
+      margin: 2.25rem auto 0;
       padding: 0 1.25rem;
     }
 
-    .text-secondary-custom {
-      color: var(--text-secondary);
-      font-size: 1rem;
-      font-weight: 500;
+    .footer-custom {
+      text-align: center;
+      font-size: .96rem;
+      margin-top: 3rem;
+      color: #7e8ea8;
+      opacity: .65;
     }
 
-    .text-muted-custom {
-      color: var(--text-muted);
-      font-size: 0.99rem;
-      margin-top: 0.5rem;
-      opacity: 0.93;
+    /* ---------- ONLY COLOR OVERRIDES BELOW (no size/spacing changes) ---------- */
+
+    /* Brighten these exact labels inside cards (e.g., “GB”, “Cores:”) */
+    .card-custom .text-secondary,
+    .card-custom .text-muted {
+      color: #eaf4ff !important;
+      /* brighter blue-white for labels/units */
     }
 
-    /* Loading animation */
-    .loading {
-      opacity: 0.6;
-      pointer-events: none;
-    }
-
-    .status-indicator {
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      margin-right: 0.5rem;
-    }
-
-    .status-online {
-      background-color: #00ff41;
-      box-shadow: 0 0 8px rgba(0, 255, 65, 0.6);
-    }
-
-    .status-offline {
-      background-color: #ff4757;
-      box-shadow: 0 0 8px rgba(255, 71, 87, 0.6);
+    /* Optionally brighten the mono numbers next to them (still color only) */
+    .mono-text {
+      color: #dff0ff;
+      /* brighter digits, no size change */
     }
   </style>
+
 </head>
 
 <body>
-  <!-- Navigation Bar -->
+  <!-- Navbar -->
   <nav class="navbar navbar-expand-lg fixed-top navbar-custom">
     <div class="container-fluid">
-      <a class="navbar-brand d-flex align-items-center" href="#">
-        <span class="emoji-icon me-2" style="font-size: 1.8rem;">🔥</span>
+      <!-- Brand goes to the dashboard route -->
+      <a class="navbar-brand d-flex align-items-center" href="{{ url_for('dashboard') }}">
+        <span class="me-2" style="font-size: 1.4rem;">🔥</span>
         Firewall Dashboard
-        <span class="status-indicator status-online ms-2" id="connection-status"></span>
       </a>
 
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"
+        aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
         <span class="navbar-toggler-icon"></span>
       </button>
 
       <div class="collapse navbar-collapse" id="navbarNav">
         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
           <li class="nav-item">
-            <a class="nav-link active" href="#monitoring">
-              <i class="bi bi-speedometer2 me-1"></i>
-              Monitoring
+            <a class="nav-link" data-nav="monitoring" href="{{ url_for('dashboard') }}#monitoring">
+              <i class="bi bi-speedometer2 me-1"></i> Monitoring
             </a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" href="#stats">
-              <i class="bi bi-bar-chart me-1"></i>
-              Statistics
+            <a class="nav-link" data-nav="stats" href="{{ url_for('statistics_page') }}">
+              <i class="bi bi-bar-chart me-1"></i> Statistics
             </a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" href="#settings">
-              <i class="bi bi-gear me-1"></i>
-              Settings
+            <a class="nav-link" data-nav="settings" href="{{ url_for('settings_page') }}">
+              <i class="bi bi-gear me-1"></i> Settings
             </a>
           </li>
         </ul>
-        
-        <!-- User Info and Logout -->
+
         <div class="navbar-nav">
           <div class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" role="button" data-bs-toggle="dropdown">
-              <span class="me-2">👤</span>
-              Admin
+            <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" role="button"
+              data-bs-toggle="dropdown" aria-expanded="false">
+              <span class="me-2">👤</span> Admin
             </a>
-            <ul class="dropdown-menu dropdown-menu-end" style="background: var(--card-bg); border: 1px solid var(--border-dark);">
-              <li><a class="dropdown-item" href="#" style="color: var(--text-secondary);">Profile</a></li>
-              <li><a class="dropdown-item" href="#" style="color: var(--text-secondary);">Settings</a></li>
-              <li><hr class="dropdown-divider" style="border-color: var(--border-dark);"></li>
+            <ul class="dropdown-menu dropdown-menu-end"
+              style="background: var(--card-bg); border: 1px solid var(--border-dark);">
+              <li><a class="dropdown-item" href="{{ url_for('settings_page') }}" style="color: #cfe3ff;">Settings</a>
+              </li>
               <li>
-                <button class="dropdown-item btn-logout" onclick="logout()" style="color: white; background: linear-gradient(135deg, #ff4757, #ff3838); margin: 0.2rem; border-radius: 0.4rem;">
-                  <span class="me-1">🚪</span>
-                  Logout
+                <hr class="dropdown-divider" style="border-color: var(--border-dark);">
+              </li>
+              <li>
+                <button class="dropdown-item btn-logout" onclick="logout()"
+                  style="color: #fff; margin: .2rem; border-radius: .4rem;">
+                  <span class="me-1">🚪</span> Logout
                 </button>
               </li>
             </ul>
           </div>
         </div>
+
       </div>
     </div>
   </nav>
 
   <div class="container-custom">
-    <h1 class="display-4 text-center mb-5 main-title text-shadow-blue d-flex align-items-center justify-content-center">
-      <span class="emoji-icon me-3" style="font-size: 3rem;">🔥</span>
-      Firewall Dashboard
+    <h1 class="display-5 text-center mb-4" style="color: var(--accent-blue); font-weight: 900; letter-spacing: .05em;">
+      <span class="me-2" style="font-size: 2.2rem;">🔥</span> Firewall Dashboard
     </h1>
 
-    <!-- System Monitoring Grid -->
+    <!-- Monitoring -->
     <div class="row g-4 mb-5" id="monitoring">
-      <!-- CPU Card -->
+      <!-- CPU -->
       <div class="col-12 col-sm-6 col-lg-4">
         <div class="card card-custom p-4 text-center">
           <div class="gauge-container">
             <svg width="115" height="115">
-              <circle class="stroke-gauge-bg" stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5"
-                r="46" />
+              <circle stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5" r="46" />
               <circle class="gauge-fg" stroke="var(--gauge-cpu)" stroke-width="13" fill="none" id="cpu_circle" cx="57.5"
                 cy="57.5" r="46" stroke-dasharray="289" stroke-dashoffset="289" />
             </svg>
-            <div class="gauge-text text-shadow-gauge" id="cpu_percent">0%</div>
+            <div class="gauge-text" id="cpu_percent">0%</div>
           </div>
-          <div class="text-secondary-custom text-center">CPU Usage</div>
-          <div class="text-muted-custom text-center">
-            Cores: <span id="cpu_cores" class="mono-text text-shadow-mono">-</span>
+          <div class="text-secondary text-center">CPU Usage</div>
+          <div class="text-muted text-center">
+            Cores: <span id="cpu_cores" class="mono-text">-</span>
           </div>
         </div>
       </div>
 
-      <!-- RAM Card -->
+      <!-- RAM -->
       <div class="col-12 col-sm-6 col-lg-4">
         <div class="card card-custom p-4 text-center">
           <div class="gauge-container">
             <svg width="115" height="115">
-              <circle class="stroke-gauge-bg" stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5"
-                r="46" />
+              <circle stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5" r="46" />
               <circle class="gauge-fg" stroke="var(--gauge-ram)" stroke-width="13" fill="none" id="ram_circle" cx="57.5"
                 cy="57.5" r="46" stroke-dasharray="289" stroke-dashoffset="289" />
             </svg>
-            <div class="gauge-text text-shadow-gauge" id="ram_percent">0%</div>
+            <div class="gauge-text" id="ram_percent">0%</div>
           </div>
-          <div class="text-secondary-custom text-center">RAM Usage</div>
-          <div class="text-muted-custom text-center">
-            <span id="ram_used" class="mono-text text-shadow-mono">--</span> / <span id="ram_total"
-              class="mono-text text-shadow-mono">--</span> GB
+          <div class="text-secondary text-center">RAM Usage</div>
+          <div class="text-muted text-center">
+            <span id="ram_used" class="mono-text">--</span> / <span id="ram_total" class="mono-text">--</span> GB
           </div>
         </div>
       </div>
 
-      <!-- Disk Card -->
+      <!-- Disk -->
       <div class="col-12 col-sm-6 col-lg-4">
         <div class="card card-custom p-4 text-center">
           <div class="gauge-container">
             <svg width="115" height="115">
-              <circle class="stroke-gauge-bg" stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5"
-                r="46" />
+              <circle stroke="var(--gauge-bg)" stroke-width="13" fill="none" cx="57.5" cy="57.5" r="46" />
               <circle class="gauge-fg" stroke="var(--gauge-disk)" stroke-width="13" fill="none" id="disk_circle"
                 cx="57.5" cy="57.5" r="46" stroke-dasharray="289" stroke-dashoffset="289" />
             </svg>
-            <div class="gauge-text text-shadow-gauge" id="disk_percent">0%</div>
+            <div class="gauge-text" id="disk_percent">0%</div>
           </div>
-          <div class="text-secondary-custom text-center">Disk Usage</div>
-          <div class="text-muted-custom text-center">
-            <span id="disk_used" class="mono-text text-shadow-mono">-</span> / <span id="disk_total"
-              class="mono-text text-shadow-mono">-</span> GB
+          <div class="text-secondary text-center">Disk Usage</div>
+          <div class="text-muted text-center">
+            <span id="disk_used" class="mono-text">-</span> / <span id="disk_total" class="mono-text">-</span> GB
           </div>
         </div>
       </div>
     </div>
 
-    <!-- Firewall Stats -->
+    <!-- Stats -->
     <div class="row g-4 mb-5" id="stats">
-      <!-- Top Blocked IPs - Left -->
       <div class="col-12 col-md-6">
-        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-start"
-          style="min-height: 150px;">
+        <div class="card card-custom card-hover p-4" style="min-height:100px;">
           <span class="card-title-custom">Top Blocked IPs</span>
           <ul id="top_blocked_ips" class="list-custom w-100">
             {% if top_ips %}
-              {% for ip in top_ips %}
-                <li><span>{{ ip }}</span></li>
-              {% endfor %}
+            {% for ip in top_ips %}<li><span class="ip">{{ ip }}</span></li>{% endfor %}
             {% else %}
-              <li style="color: #666;">No blocked IPs</li>
+            <li>No blocked IPs</li>
             {% endif %}
           </ul>
         </div>
       </div>
 
-      <!-- Block Reasons - Right -->
       <div class="col-12 col-md-6">
-        <div class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-start"
-          style="min-height: 150px;">
+        <div class="card card-custom card-hover p-4" style="min-height:100px;">
           <span class="card-title-custom">Block Reasons</span>
           <ul id="block_reasons" class="list-custom w-100">
             {% if top_reasons %}
-              {% for reason in top_reasons %}
-                <li><span>{{ reason }}</span></li>
-              {% endfor %}
+            {% for reason in top_reasons %}<li><span class="reason">{{ reason }}</span></li>{% endfor %}
             {% else %}
-              <li style="color: #666;">No blocks recorded</li>
+            <li>No reasons recorded</li>
             {% endif %}
           </ul>
         </div>
       </div>
 
-      <!-- Stat Cards - Centered Text -->
       <div class="col-12 col-md-6 col-xl-4">
-        <div
-          class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
-          style="min-height: 120px;">
+        <div class="card card-custom card-hover p-4 text-center" style="min-height:100px;">
           <span class="card-title-custom">Total Requests</span>
-          <span class="stat-value stat-blue text-shadow-stat" id="total_requests">0</span>
+          <span class="stat-value stat-blue" id="total_requests">0</span>
         </div>
       </div>
 
       <div class="col-12 col-md-6 col-xl-4">
-        <div
-          class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
-          style="min-height: 120px;">
+        <div class="card card-custom card-hover p-4 text-center" style="min-height:100px;">
           <span class="card-title-custom">Allowed Requests</span>
-          <span class="stat-value stat-green text-shadow-green" id="allowed_requests">0</span>
+          <span class="stat-value stat-green" id="allowed_requests">0</span>
         </div>
       </div>
 
       <div class="col-12 col-md-6 col-xl-4">
-        <div
-          class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
-          style="min-height: 120px;">
+        <div class="card card-custom card-hover p-4 text-center" style="min-height:100px;">
           <span class="card-title-custom">Blocked Requests</span>
-          <span class="stat-value stat-red text-shadow-red" id="blocked_requests">0</span>
+          <span class="stat-value stat-red" id="blocked_requests">0</span>
         </div>
       </div>
 
       <div class="col-12 col-md-6 col-xl-4">
-        <div
-          class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
-          style="min-height: 120px;">
+        <div class="card card-custom card-hover p-4 text-center" style="min-height:100px;">
           <span class="card-title-custom">DDoS Blocks</span>
-          <span class="stat-value stat-red text-shadow-red" id="ddos_blocks">0</span>
+          <span class="stat-value stat-red" id="ddos_blocks">0</span>
         </div>
       </div>
 
       <div class="col-12 col-md-6 col-xl-4">
-        <div
-          class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
-          style="min-height: 120px;">
+        <div class="card card-custom card-hover p-4 text-center" style="min-height:100px;">
           <span class="card-title-custom">AI-based Blocks</span>
-          <span class="stat-value stat-violet text-shadow-violet" id="ai_based_blocks">0</span>
+          <span class="stat-value stat-violet" id="ai_based_blocks">0</span>
         </div>
       </div>
 
       <div class="col-12 col-md-6 col-xl-4">
-        <div
-          class="card card-custom card-hover p-4 d-flex flex-column justify-content-between align-items-center text-center"
-          style="min-height: 120px;">
+        <div class="card card-custom card-hover p-4 text-center" style="min-height:100px;">
           <span class="card-title-custom">Uptime</span>
-          <span class="stat-value stat-violet text-shadow-violet" id="uptime">0s</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Additional Info Section -->
-    <div class="row g-4 mb-5">
-      <div class="col-12">
-        <div class="card card-custom p-4">
-          <h5 class="card-title-custom mb-3">System Information</h5>
-          <div class="row">
-            <div class="col-md-4">
-              <div class="text-muted-custom">Last Update:</div>
-              <div class="mono-text" id="last_update">Never</div>
-            </div>
-            <div class="col-md-4">
-              <div class="text-muted-custom">Firewall Status:</div>
-              <div class="mono-text" id="firewall_status">Active</div>
-            </div>
-            <div class="col-md-4">
-              <div class="text-muted-custom">Protection Level:</div>
-              <div class="mono-text" id="protection_level">High</div>
-            </div>
-          </div>
+          <span class="stat-value stat-violet" id="uptime">0</span>
         </div>
       </div>
     </div>
 
     <footer class="footer-custom">
-      © 2025 Sharevex Firewall System.
+      © 2025 Sharevex Firewall System. Auto-refresh every 5 seconds.
     </footer>
   </div>
 
+  <!-- Bootstrap JS -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
   <script>
-    // --- CONNECTION STATUS ---
-    let connectionStatus = document.getElementById('connection-status');
-    let lastUpdateElement = document.getElementById('last_update');
-    
-    function updateConnectionStatus(online) {
-      connectionStatus.className = `status-indicator ${online ? 'status-online' : 'status-offline'}`;
-    }
-
-    function updateLastUpdate() {
-      const now = new Date();
-      lastUpdateElement.textContent = now.toLocaleTimeString();
-    }
-
-    // --- LOGOUT FUNCTION ---
+    // --- Logout (POST /logout then go to /login)
     function logout() {
-      if (confirm('Are you sure you want to logout?')) {
-        fetch('/logout', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          }
-        }).then(() => {
-          window.location.href = '/login';
-        }).catch(() => {
-          window.location.href = '/login';
-        });
-      }
+      if (!confirm('Are you sure you want to logout?')) return;
+      fetch('{{ url_for("logout") }}', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+        .then(() => { window.location.href = '{{ url_for("login") }}'; })
+        .catch(() => { window.location.href = '{{ url_for("login") }}'; });
     }
 
-    // --- SYSTEM MONITORING ---
+    // --- Gauge helper (2πr ≈ 289 for r=46)
     function setGauge(circle, percent) {
+      if (!circle) return;
       const total = circle.getAttribute('stroke-dasharray') ? parseFloat(circle.getAttribute('stroke-dasharray')) : 289;
-      let val = Math.max(0, Math.min(100, percent || 0));
+      const val = Math.max(0, Math.min(100, percent || 0));
       circle.style.strokeDashoffset = (total - ((val / 100) * total)).toFixed(2);
     }
 
+    // --- System metrics
     function updateSystem() {
-      fetch('/metrics')
-        .then(r => {
-          if (!r.ok) throw new Error('Network response was not ok');
-          return r.json();
-        })
+      fetch('{{ url_for("metrics") }}')
+        .then(r => r.json())
         .then(data => {
-          updateConnectionStatus(true);
-          updateLastUpdate();
-          
-          // CPU
-          document.getElementById('cpu_percent').textContent = (data.cpu.total || 0).toFixed(1) + '%';
-          setGauge(document.getElementById('cpu_circle'), data.cpu.total || 0);
-          document.getElementById('cpu_cores').textContent = data.cpu.cores || '-';
-          
-          // RAM
-          document.getElementById('ram_percent').textContent = (data.ram.percent || 0).toFixed(1) + '%';
-          setGauge(document.getElementById('ram_circle'), data.ram.percent || 0);
-          document.getElementById('ram_total').textContent = data.ram.total || '--';
-          document.getElementById('ram_used').textContent = data.ram.used || '--';
-          
-          // Disk
-          if (data.disk && data.disk.length > 0) {
-            const disk = data.disk[0];
-            document.getElementById('disk_percent').textContent = (disk.percent || 0).toFixed(1) + '%';
-            setGauge(document.getElementById('disk_circle'), disk.percent || 0);
-            document.getElementById('disk_total').textContent = disk.total || '-';
-            document.getElementById('disk_used').textContent = disk.used || '-';
+          const cpuP = document.getElementById('cpu_percent');
+          const cpuC = document.getElementById('cpu_circle');
+          const cpuCores = document.getElementById('cpu_cores');
+          if (cpuP) cpuP.textContent = (data.cpu?.total || 0).toFixed(1) + '%';
+          setGauge(cpuC, data.cpu?.total || 0);
+          if (cpuCores) cpuCores.textContent = data.cpu?.cores ?? '-';
+
+          const ramP = document.getElementById('ram_percent');
+          const ramC = document.getElementById('ram_circle');
+          const ramT = document.getElementById('ram_total');
+          const ramU = document.getElementById('ram_used');
+          if (ramP) ramP.textContent = (data.ram?.percent || 0).toFixed(1) + '%';
+          setGauge(ramC, data.ram?.percent || 0);
+          if (ramT) ramT.textContent = data.ram?.total ?? '--';
+          if (ramU) ramU.textContent = data.ram?.used ?? '--';
+
+          if (data.disk && data.disk.length) {
+            const d = data.disk[0];
+            const diskP = document.getElementById('disk_percent');
+            const diskC = document.getElementById('disk_circle');
+            const diskT = document.getElementById('disk_total');
+            const diskU = document.getElementById('disk_used');
+            if (diskP) diskP.textContent = (d.percent || 0).toFixed(1) + '%';
+            setGauge(diskC, d.percent || 0);
+            if (diskT) diskT.textContent = d.total ?? '-';
+            if (diskU) diskU.textContent = d.used ?? '-';
           }
-          
-          // Update uptime from metrics
-          if (data.uptime && data.uptime.formatted) {
-            document.getElementById('uptime').textContent = data.uptime.formatted;
-          }
-        })
-        .catch(err => {
-          console.error('Failed to fetch /metrics:', err);
-          updateConnectionStatus(false);
-        });
+
+          // Uptime (also available via /metrics)
+          const up = document.getElementById('uptime');
+          if (up && data.uptime?.formatted) up.textContent = data.uptime.formatted;
+        }).catch(() => { });
     }
 
-    // --- FIREWALL STATS ---
+    // --- Firewall stats
     function updateFirewall() {
-      fetch('/stats')
-        .then(r => {
-          if (!r.ok) throw new Error('Network response was not ok');
-          return r.json();
-        })
+      fetch('{{ url_for("stats_endpoint") }}')
+        .then(r => r.json())
         .then(data => {
-          // Update all firewall metrics with fallback to 0
-          document.getElementById('total_requests').textContent = data.total_requests ?? 0;
-          document.getElementById('allowed_requests').textContent = data.allowed_requests ?? 0;
-          document.getElementById('blocked_requests').textContent = data.blocked_requests ?? 0;
-          document.getElementById('ddos_blocks').textContent = data.ddos_blocks ?? 0;
-          document.getElementById('ai_based_blocks').textContent = data.ai_based_blocks ?? 0;
-          
-          // Update uptime with multiple fallback options
-          if (data.uptime_formatted) {
-            document.getElementById('uptime').textContent = data.uptime_formatted;
-          } else if (data.uptime && data.uptime.formatted) {
-            document.getElementById('uptime').textContent = data.uptime.formatted;
-          } else if (data.uptime_hms) {
-            document.getElementById('uptime').textContent = data.uptime_hms;
-          }
-        })
-        .catch(err => {
-          console.error('Failed to fetch /stats:', err);
-          updateConnectionStatus(false);
-        });
+          const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+          setTxt('total_requests', data.total_requests ?? 0);
+          setTxt('allowed_requests', data.allowed_requests ?? 0);
+          setTxt('blocked_requests', data.blocked_requests ?? 0);
+          setTxt('ddos_blocks', data.ddos_blocks ?? 0);
+          setTxt('ai_based_blocks', data.ai_based_blocks ?? 0);
+        }).catch(() => { });
     }
 
-    // --- UPDATE TOP BLOCKED IPs ---
-    function updateTopBlocked() {
-      fetch('/top_ips')
-        .then(r => {
-          if (!r.ok) throw new Error('Network response was not ok');
-          return r.json();
-        })
-        .then(data => {
-          const topIpsList = document.getElementById('top_blocked_ips');
-          if (topIpsList) {
-            topIpsList.innerHTML = '';
-            const entries = Object.entries(data).slice(0, 5);
-            if (entries.length === 0) {
-              topIpsList.innerHTML = '<li style="color: #666;">No blocked IPs</li>';
-            } else {
-              entries.forEach(([ip, count]) => {
-                const li = document.createElement('li');
-                li.innerHTML = `<span>${ip}</span><span class="percent">${count}</span>`;
-                topIpsList.appendChild(li);
-              });
-            }
-          }
-        })
-        .catch(err => {
-          console.error('Failed to fetch top IPs:', err);
-          const topIpsList = document.getElementById('top_blocked_ips');
-          if (topIpsList) {
-            topIpsList.innerHTML = '<li style="color: #ff4757;">Failed to load</li>';
-          }
-        });
+    // --- Make counters tick: ping "/" (firewall_route) periodically
+    function pingFirewall() {
+      fetch('{{ url_for("firewall_route", path="") }}', {
+        method: 'GET',
+        headers: { 'X-Dashboard-Ping': '1' }
+      }).catch(() => { });
     }
 
-    // --- SMOOTH SCROLLING FOR NAVBAR LINKS ---
-    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-      anchor.addEventListener('click', function (e) {
+    // --- Refresh "Top Blocked" from server-side true events
+    function refreshTopBlocked() {
+      fetch('{{ url_for("top_blocked") }}')
+        .then(r => r.json())
+        .then(map => {
+          const ul = document.getElementById('top_blocked_ips');
+          if (!ul) return;
+          ul.innerHTML = '';
+          const entries = Object.entries(map);
+          if (!entries.length) {
+            ul.innerHTML = '<li>No blocked IPs</li>';
+            return;
+          }
+          entries.forEach(([ip, count]) => {
+            const li = document.createElement('li');
+            li.innerHTML = `<span class="ip">${ip}</span><span class="percent">${count}</span>`;
+            ul.appendChild(li);
+          });
+        }).catch(() => { });
+    }
+    (function () {
+      const dashPath = "{{ url_for('dashboard') }}";
+      const isDashboard = location.pathname === dashPath || location.pathname === (dashPath + '/');
+
+      const linkMonitoring = document.querySelector('a[data-nav="monitoring"]');
+      const linkStats = document.querySelector('a[data-nav="stats"]');
+      const linkSettings = document.querySelector('a[data-nav="settings"]');
+
+      function setActive(el) {
+        document.querySelectorAll('.navbar-nav .nav-link').forEach(a => a.classList.remove('active'));
+        if (el) el.classList.add('active');
+      }
+
+      function updateActive() {
+        if (isDashboard) {
+          // On the dashboard: default to Monitoring; switch to Statistics if #stats
+          if (location.hash === '#stats') setActive(linkStats);
+          else setActive(linkMonitoring); // '#monitoring' or no hash
+        } else {
+          // Any other page (e.g., Settings)
+          setActive(linkSettings);
+        }
+      }
+
+      window.addEventListener('hashchange', updateActive);
+      updateActive();
+    })();
+
+
+    // --- Smooth scroll only for in-page anchors
+    document.querySelectorAll('a[href^="#"]').forEach(a => {
+      a.addEventListener('click', function (e) {
         e.preventDefault();
         const target = document.querySelector(this.getAttribute('href'));
-        if (target) {
-          target.scrollIntoView({
-            behavior: 'smooth',
-            block: 'start'
-          });
-        }
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
     });
 
-    // --- ERROR HANDLING ---
-    window.addEventListener('error', function(e) {
-      console.error('JavaScript error:', e.error);
-    });
+    // --- Init
+    updateSystem();
+    updateFirewall();
+    pingFirewall();
+    refreshTopBlocked();
 
-    // --- INITIALIZATION ---
-    document.addEventListener('DOMContentLoaded', function() {
-      console.log('Dashboard initializing...');
-      
-      // Initial load
-      updateSystem();
-      updateFirewall();
-      updateTopBlocked();
-      
-      // Set up intervals
-      setInterval(updateSystem, 2000);     // Update system metrics every 2 seconds
-      setInterval(updateFirewall, 5000);   // Update firewall stats every 5 seconds
-      setInterval(updateTopBlocked, 10000); // Update top blocked IPs every 10 seconds
-      
-      console.log('Dashboard initialized successfully');
-    });
-
-    // --- VISIBILITY CHANGE HANDLING ---
-    document.addEventListener('visibilitychange', function() {
-      if (!document.hidden) {
-        // Page became visible, refresh data immediately
-        updateSystem();
-        updateFirewall();
-        updateTopBlocked();
-      }
-    });
+    setInterval(updateSystem, 1000);     // system metrics
+    setInterval(updateFirewall, 5000);   // firewall counters
+    setInterval(pingFirewall, 3000);     // ensure counters move (hits "/")
+    setInterval(refreshTopBlocked, 10000); // top blocked live
   </script>
 </body>
 
