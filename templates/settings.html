@@ -1,0 +1,626 @@
+{% block content %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Settings – Firewall</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+
+<style>
+  :root {
+    --dark-bg: #181d26;
+    --card-bg: rgba(24, 29, 38, 0.95);
+    --border-dark: #233043;
+
+    --text-primary: #d6e3f3;
+    --text-secondary: #a7c7e7;
+    --text-muted: #b9c9d5;
+    --accent-blue: #54aaff;
+
+    --navbar-bg: rgba(18, 23, 32, 0.98);
+  }
+
+  /* Base (same visual as dashboard) */
+  html, body { background: radial-gradient(ellipse at top left, #232b3b 30%, #181d26 90%); color: var(--text-primary); }
+  body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; min-height: 100vh; padding-top: 80px; } /* fixed navbar offset */
+
+  /* Navbar (same as dashboard) */
+  .navbar-custom {
+    background: var(--navbar-bg);
+    backdrop-filter: blur(10px);
+    border-bottom: 1.5px solid var(--border-dark);
+    box-shadow: 0 2px 20px rgba(0,0,0,.3);
+  }
+  .navbar-brand {
+    color: var(--accent-blue) !important;
+    font-weight: 700;
+    font-size: 1.4rem;
+    letter-spacing: .03em;
+    text-shadow: 0 2px 12px rgba(84,170,255,.3);
+  }
+  .navbar-brand:hover { color: #7bb8ff !important; text-shadow: 0 2px 16px rgba(84,170,255,.5); transition: all .3s ease; }
+  .navbar-nav .nav-link {
+    color: var(--text-secondary) !important;
+    font-weight: 600;
+    padding: .5rem 1rem !important;
+    border-radius: .5rem;
+    transition: all .25s ease;
+  }
+  .navbar-nav .nav-link:hover { color: var(--text-primary) !important; background-color: rgba(84,170,255,.1); transform: translateY(-1px); }
+  .navbar-nav .nav-link.active { color: var(--text-primary) !important; background-color: rgba(84,170,255,.16); }
+
+  .dropdown-menu { background: var(--card-bg); border: 1px solid var(--border-dark); }
+  .dropdown-item { color: var(--text-primary); }
+  .dropdown-item:hover { background: rgba(84,170,255,.12); }
+
+  /* Ensure toggler icon is visible on dark bg */
+  .navbar-toggler { border-color: rgba(255,255,255,.25); }
+  .navbar-toggler-icon {
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'%3E%3Cpath stroke='rgba(255,255,255,0.85)' stroke-linecap='round' stroke-miterlimit='10' stroke-width='2' d='M4 7h22M4 15h22M4 23h22'/%3E%3C/svg%3E");
+  }
+
+  /* Page title */
+  .page-title { color: var(--accent-blue); letter-spacing: .3px; }
+
+  /* Cards (map to dashboard tokens) */
+  .card-custom {
+    background: var(--card-bg);
+    border: 1.5px solid var(--border-dark);
+    border-radius: 18px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.28);
+  }
+  .subtle { color: var(--text-muted); }
+
+  /* Section titles */
+  .card-body h5 {
+    color: #ffffff;
+    font-weight: 600;
+    letter-spacing: .3px;
+  }
+
+  /* Buttons */
+  .btn-accent {
+    background: linear-gradient(135deg, var(--accent-blue), #7bb8ff);
+    border: 0; color: #fff;
+  }
+  .btn-accent:hover { filter: brightness(1.08); }
+  .btn-ghost {
+    background: transparent; border: 1px solid var(--border-dark); color: var(--text-primary);
+  }
+  .btn-ghost:hover { background: rgba(84,170,255,.08); }
+
+  /* Inputs */
+  .form-control, .form-select {
+    background: rgba(24,29,38,.85);
+    color: var(--text-primary);
+    border: 1px solid #2f3b54;
+  }
+  .form-control::placeholder { color: #d5e3ff; }
+  .form-control:focus {
+    border-color: var(--accent-blue);
+    box-shadow: 0 0 0 .2rem rgba(84,170,255,.22);
+  }
+  .input-icon { position: relative; }
+  .input-icon i {
+    position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+    pointer-events: none; color: #e3ecff;
+  }
+  .input-icon .form-control { padding-left: 2.2rem; }
+
+  /* Tables */
+  table.table { --bs-table-bg: transparent; }
+  .table thead th { color: #eaf2ff; border-bottom-color: #3a5a86; }
+  .table tbody td { color: #f0f6ff; border-top-color: #2b466e; }
+  .table-hover > tbody > tr:hover > * { background-color: rgba(84,170,255,.10); }
+  code { color: #ffffff; background: #153154; border-radius: .35rem; padding: .15rem .4rem; }
+
+  /* Badges */
+  .badge-soft { background: #18355f; border: 1px solid #2f63a6; color: #e6f0ff; }
+  .badge-live { background: #10381e; border: 1px solid #1f6a3a; color: #eafff0; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+
+  /* Misc */
+  .toolbar { gap: .5rem; }
+  .empty { color: var(--text-muted); border: 1px dashed #3a5a86; border-radius: 14px; padding: 1rem; text-align: center; }
+  .overlay { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(7,13,26,.45); backdrop-filter: blur(2px); border-radius: 18px; }
+  .overlay.show { display: flex; }
+  .toast.text-bg-dark { color: #f3f7ff; }
+</style>
+
+</head>
+
+<body>
+  <!-- Navbar -->
+  <nav class="navbar navbar-expand-lg navbar-dark fixed-top navbar-custom">
+    <div class="container-fluid">
+      <a class="navbar-brand d-flex align-items-center" href="{{ url_for('dashboard') }}">
+        <span class="me-2" style="font-size: 1.4rem;">🔥</span>
+        Firewall Dashboard
+      </a>
+
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"
+              aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+
+      <div class="collapse navbar-collapse" id="navbarNav">
+        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+          <!-- Dashboard sections -->
+          <li class="nav-item">
+            <a class="nav-link {{ 'active' if request.endpoint == 'dashboard' else '' }}"
+               href="{{ url_for('dashboard') }}#monitoring">
+              <i class="bi bi-speedometer2 me-1"></i> Monitoring
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link {{ 'active' if request.endpoint == 'dashboard_stats' else '' }}"
+               href="{{ url_for('dashboard') }}#stats">
+              <i class="bi bi-bar-chart me-1"></i> Statistics
+            </a>
+          </li>
+          <!-- Settings (this page) -->
+          <li class="nav-item">
+            <a class="nav-link {{ 'active' if request.endpoint == 'settings_page' else '' }}"
+               href="{{ url_for('settings_page') }}">
+              <i class="bi bi-gear me-1"></i> Settings
+            </a>
+          </li>
+        </ul>
+
+        <div class="navbar-nav">
+          <div class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" role="button"
+               data-bs-toggle="dropdown" aria-expanded="false">
+              <span class="me-2">👤</span> Admin
+            </a>
+            <ul class="dropdown-menu dropdown-menu-end">
+              <li><a class="dropdown-item" href="{{ url_for('settings_page') }}">Settings</a></li>
+              <li><hr class="dropdown-divider"></li>
+              <li>
+                <button class="dropdown-item btn-logout" onclick="logout()">
+                  <span class="me-1">🚪</span> Logout
+                </button>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </nav>
+
+  <!-- Page content -->
+  <div class="container py-4">
+    <div class="d-flex align-items-center justify-content-between mb-4">
+      <h2 class="page-title mb-0"><i class="bi bi-shield-lock me-2"></i>Settings</h2>
+      <div class="toolbar d-flex">
+        <button id="refreshAll" class="btn btn-ghost"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+      </div>
+    </div>
+
+    <!-- Blocked IPs -->
+    <div class="card card-custom mb-4 position-relative">
+      <div class="overlay" id="overlay-blocks">
+        <div class="spinner-border" role="status" aria-label="Loading"></div>
+      </div>
+      <div class="card-body">
+        <div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
+          <div>
+            <h5 class="mb-1">Blocked IPs</h5>
+            <div class="subtle small">Inline edit reasons • live expiry countdown</div>
+          </div>
+          <div class="d-flex flex-wrap toolbar">
+            <div class="input-icon me-2">
+              <i class="bi bi-search"></i>
+              <input id="searchBlocks" class="form-control form-control-sm" placeholder="Search IP or reason">
+            </div>
+            <button class="btn btn-sm btn-accent" data-bs-toggle="modal" data-bs-target="#addBlockModal">
+              <i class="bi bi-plus-lg me-1"></i>Add Block
+            </button>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <table class="table table-hover align-middle" id="blocksTable">
+            <thead>
+              <tr>
+                <th>IP</th>
+                <th style="width:40%">Reason</th>
+                <th>Expires</th>
+                <th class="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="blocksTbody"></tbody>
+          </table>
+        </div>
+        <div id="blocksEmpty" class="empty d-none"><i class="bi bi-inboxes me-1"></i>No blocked IPs yet.</div>
+      </div>
+    </div>
+
+    <!-- Admin users -->
+    <div class="card card-custom position-relative">
+      <div class="overlay" id="overlay-admins">
+        <div class="spinner-border" role="status" aria-label="Loading"></div>
+      </div>
+      <div class="card-body">
+        <div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
+          <div>
+            <h5 class="mb-1">Admins</h5>
+            <div class="subtle small">Manage administrator accounts</div>
+          </div>
+          <div class="d-flex flex-wrap toolbar">
+            <div class="input-icon me-2">
+              <i class="bi bi-search"></i>
+              <input id="searchAdmins" class="form-control form-control-sm" placeholder="Search username">
+            </div>
+            <button class="btn btn-sm btn-accent" data-bs-toggle="modal" data-bs-target="#addAdminModal">
+              <i class="bi bi-person-plus me-1"></i>Add Admin
+            </button>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <table class="table table-hover align-middle" id="adminsTable">
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Created</th>
+                <th class="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="adminsTbody"></tbody>
+          </table>
+        </div>
+        <div id="adminsEmpty" class="empty d-none"><i class="bi bi-person-gear me-1"></i>No admins found.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toasts -->
+  <div class="position-fixed bottom-0 end-0 p-3" style="z-index:1080">
+    <div id="toast" class="toast align-items-center text-bg-dark border-0" role="status" aria-live="polite" aria-atomic="true">
+      <div class="d-flex">
+        <div class="toast-body" id="toastBody">Done.</div>
+        <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Block Modal -->
+  <div class="modal fade" id="addBlockModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content card-custom">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-ban me-2"></i>Add IP Block</h5>
+          <button class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3 input-icon">
+            <label class="form-label">IP Address</label>
+            <i class="bi bi-ethernet"></i>
+            <input type="text" class="form-control" id="block_ip" placeholder="e.g., 203.0.113.10"
+                   pattern="^(?:\\d{1,3}\\.){3}\\d{1,3}$">
+            <div class="form-text subtle">IPv4 only (e.g., 203.0.113.10)</div>
+          </div>
+          <div class="mb-3 input-icon">
+            <label class="form-label">Reason</label>
+            <i class="bi bi-pencil"></i>
+            <input type="text" class="form-control" id="block_reason" placeholder="Manual block">
+          </div>
+          <div class="mb-3 input-icon">
+            <label class="form-label">TTL (seconds)</label>
+            <i class="bi bi-hourglass-split"></i>
+            <input type="number" class="form-control" id="block_ttl" placeholder="300" min="30" value="300">
+            <div class="form-text subtle">Minimum 30 seconds</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-accent" id="saveBlockBtn">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Admin Modal -->
+  <div class="modal fade" id="addAdminModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content card-custom">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-person-vcard me-2"></i>Add Admin</h5>
+          <button class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3 input-icon">
+            <label class="form-label">Username</label>
+            <i class="bi bi-person"></i>
+            <input type="text" class="form-control" id="admin_username" placeholder="newadmin" autocomplete="username">
+          </div>
+          <div class="mb-1 input-icon">
+            <label class="form-label">Password</label>
+            <i class="bi bi-lock"></i>
+            <input type="password" class="form-control" id="admin_password" placeholder="********" autocomplete="new-password">
+          </div>
+          <div class="form-text subtle">Password is sent via current session only. No CSRF token added as requested.</div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-accent" id="saveAdminBtn">Create</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reset Admin Password Modal -->
+  <div class="modal fade" id="resetPwdModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content card-custom">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-key me-2"></i>Reset Password</h5>
+          <button class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-2">
+            <label class="form-label">Username</label>
+            <input type="text" class="form-control" id="reset_user_readonly" readonly>
+          </div>
+          <div class="mb-2 input-icon">
+            <label class="form-label">New password</label>
+            <i class="bi bi-lock"></i>
+            <input type="password" class="form-control" id="reset_password" placeholder="New password">
+          </div>
+          <div class="mb-1 input-icon">
+            <label class="form-label">Confirm password</label>
+            <i class="bi bi-lock-fill"></i>
+            <input type="password" class="form-control" id="reset_password2" placeholder="Confirm password">
+          </div>
+          <div class="form-text subtle">Minimum 6 characters.</div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-accent" id="doResetBtn">Update</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    // Logout helper: POST to /logout and redirect
+    function logout() {
+      fetch('/logout', { method: 'POST' })
+        .then(() => window.location.href = '/login')
+        .catch(() => window.location.reload());
+    }
+
+    // ---------- Utilities ----------
+    const $ = (q, root = document) => root.querySelector(q);
+    const $$ = (q, root = document) => [...root.querySelectorAll(q)];
+    const toastEl = $('#toast');
+    const toastBody = $('#toastBody');
+    const toast = new bootstrap.Toast(toastEl, { delay: 2500 });
+    function notify(msg) { toastBody.textContent = msg; toast.show(); }
+
+    function fmtAbs(ts) { if (!ts) return '-'; try { return new Date(ts).toLocaleString(); } catch { return ts; } }
+    function fmtRel(ts) {
+      if (!ts) return '-';
+      const d = new Date(ts).getTime() - Date.now();
+      const s = Math.round(d / 1000);
+      const abs = Math.abs(s);
+      if (abs < 60) return (s > 0 ? '' : '-') + abs + 's';
+      const m = Math.round(abs / 60); if (m < 60) return (s > 0 ? '' : '-') + m + 'm';
+      const h = Math.round(m / 60); return (s > 0 ? '' : '-') + h + 'h';
+    }
+
+    function ipv4Valid(ip) {
+      const r = /^(?:\\d{1,3}\\.){3}\\d{1,3}$/; if (!r.test(ip)) return false;
+      return ip.split('.').every(o => +o >= 0 && +o <= 255);
+    }
+
+    // ---------- Blocks ----------
+    let BLOCKS = [];
+    function blockRow(b) {
+      const tr = document.createElement('tr');
+      tr.dataset.ip = b.ip;
+      tr.innerHTML = `
+      <td class="align-middle">
+        <code class="me-2">${b.ip}</code>
+        <span class="badge badge-soft"><span class="status-dot" style="background:${Date.parse(b.expires_at) > Date.now() ? '#22c55e' : '#ff6b6b'}"></span>
+        <span class="d-none d-sm-inline">${fmtAbs(b.expires_at)}</span></span>
+      </td>
+      <td>
+        <input class="form-control form-control-sm" value="${(b.reason || '').replaceAll('"', '&quot;')}" data-ip="${b.ip}">
+      </td>
+      <td>
+        <span class="badge badge-live" data-expires="${b.expires_at || ''}">in ${fmtRel(b.expires_at)}</span>
+      </td>
+      <td class="text-end">
+        <div class="btn-group">
+          <button class="btn btn-sm btn-ghost" data-action="save" data-ip="${b.ip}"><i class="bi bi-save2 me-1"></i>Save</button>
+          <button class="btn btn-sm btn-ghost text-danger" data-action="delete" data-ip="${b.ip}"><i class="bi bi-trash3 me-1"></i>Delete</button>
+        </div>
+      </td>`;
+      return tr;
+    }
+
+    async function loadBlocks() {
+      $('#overlay-blocks').classList.add('show');
+      try {
+        const r = await fetch('/api/blocks');
+        const data = await r.json();
+        BLOCKS = data.blocks || [];
+        renderBlocks();
+      } finally { $('#overlay-blocks').classList.remove('show'); }
+    }
+
+    function renderBlocks() {
+      const tb = $('#blocksTbody');
+      const q = ($('#searchBlocks').value || '').toLowerCase();
+      tb.innerHTML = '';
+      (BLOCKS.filter(b => b.ip.toLowerCase().includes(q) || (b.reason || '').toLowerCase().includes(q)))
+        .forEach(b => tb.appendChild(blockRow(b)));
+      $('#blocksEmpty').classList.toggle('d-none', tb.children.length > 0);
+    }
+
+    // live countdown
+    setInterval(() => {
+      $$('[data-expires]').forEach(el => { el.textContent = 'in ' + fmtRel(el.dataset.expires); });
+    }, 1000 * 15);
+
+    document.addEventListener('click', async (e) => {
+      const t = e.target.closest('button'); if (!t) return;
+      const act = t.getAttribute('data-action');
+
+      if (act === 'save') {
+        const ip = t.getAttribute('data-ip');
+        const input = document.querySelector(`input[data-ip="${ip}"]`);
+        const reason = input ? input.value.trim() : '';
+        await fetch(`/api/blocks/${encodeURIComponent(ip)}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason })
+        });
+        notify(`Saved reason for ${ip}`);
+        await loadBlocks();
+      }
+
+      if (act === 'delete') {
+        const ip = t.getAttribute('data-ip');
+        if (!confirm(`Unblock ${ip}?`)) return;
+        await fetch(`/api/blocks/${encodeURIComponent(ip)}`, { method: 'DELETE' });
+        notify(`Removed block ${ip}`);
+        await loadBlocks();
+      }
+    });
+
+    $('#searchBlocks').addEventListener('input', renderBlocks);
+
+    // New block
+    $('#saveBlockBtn').addEventListener('click', async () => {
+      const ip = $('#block_ip').value.trim();
+      const reason = $('#block_reason').value.trim() || 'Manual block';
+      const ttl = parseInt($('#block_ttl').value || '300', 10);
+      if (!ipv4Valid(ip)) return alert('Please enter a valid IPv4 address');
+      if (ttl < 30) return alert('TTL must be at least 30 seconds');
+
+      await fetch('/api/blocks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip, reason, ttl }) });
+
+      $('#block_ip').value = ''; $('#block_reason').value = ''; $('#block_ttl').value = '300';
+      bootstrap.Modal.getInstance($('#addBlockModal')).hide();
+      notify(`Blocked ${ip} for ${ttl}s`);
+      await loadBlocks();
+    });
+
+    // ---------- Admins ----------
+    let ADMINS = [];
+    function adminRow(a) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+      <td><i class="bi bi-person-gear me-1"></i><strong>${a.username}</strong></td>
+      <td>${fmtAbs(a.created_at)}</td>
+      <td class="text-end">
+        <div class="btn-group">
+          <button class="btn btn-sm btn-ghost text-warning" data-action="reset-admin" data-user="${a.username}">
+            <i class="bi bi-key me-1"></i>Reset
+          </button>
+          <button class="btn btn-sm btn-ghost text-danger" data-action="del-admin" data-user="${a.username}">
+            <i class="bi bi-person-x me-1"></i>Remove
+          </button>
+        </div>
+      </td>`;
+      return tr;
+    }
+
+    async function loadAdmins() {
+      $('#overlay-admins').classList.add('show');
+      try {
+        const r = await fetch('/api/admins');
+        const data = await r.json();
+        ADMINS = data.admins || [];
+        renderAdmins();
+      } finally { $('#overlay-admins').classList.remove('show'); }
+    }
+
+    function renderAdmins() {
+      const tb = $('#adminsTbody');
+      const q = ($('#searchAdmins').value || '').toLowerCase();
+      tb.innerHTML = '';
+      (ADMINS.filter(a => a.username.toLowerCase().includes(q))).forEach(a => tb.appendChild(adminRow(a)));
+      $('#adminsEmpty').classList.toggle('d-none', tb.children.length > 0);
+    }
+
+    $('#searchAdmins').addEventListener('input', renderAdmins);
+
+    // Reset password flow
+    let RESET_USER = null;
+
+    document.addEventListener('click', async (e) => {
+      const t = e.target.closest('button'); if (!t) return;
+      const act = t.getAttribute('data-action');
+
+      if (act === 'del-admin') {
+        const user = t.getAttribute('data-user');
+        if (!confirm(`Remove admin ${user}?`)) return;
+        await fetch(`/api/admins/${encodeURIComponent(user)}`, { method: 'DELETE' });
+        notify(`Removed admin ${user}`);
+        await loadAdmins();
+        return;
+      }
+
+      if (act === 'reset-admin') {
+        const user = t.getAttribute('data-user');
+        RESET_USER = user;
+        $('#reset_user_readonly').value = user;
+        $('#reset_password').value = '';
+        $('#reset_password2').value = '';
+        new bootstrap.Modal($('#resetPwdModal')).show();
+        return;
+      }
+    });
+
+    // Submit reset password
+    $('#doResetBtn').addEventListener('click', async () => {
+      const p1 = $('#reset_password').value;
+      const p2 = $('#reset_password2').value;
+      if (!RESET_USER) return;
+
+      if (!p1 || p1.length < 6) return alert('Password must be at least 6 characters.');
+      if (p1 !== p2) return alert('Passwords do not match.');
+
+      const res = await fetch(`/api/admins/${encodeURIComponent(RESET_USER)}/password`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: p1 })
+      });
+
+      if (res.ok) {
+        bootstrap.Modal.getInstance($('#resetPwdModal')).hide();
+        notify(`Password updated for ${RESET_USER}`);
+      } else {
+        const j = await res.json().catch(()=>({}));
+        alert(`Failed to update password: ${j.error || res.statusText}`);
+      }
+    });
+
+    // New admin
+    $('#saveAdminBtn').addEventListener('click', async () => {
+      const username = $('#admin_username').value.trim();
+      const password = $('#admin_password').value;
+      if (!username || !password) return alert('Username and password are required');
+
+      await fetch('/api/admins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
+      $('#admin_username').value = ''; $('#admin_password').value = '';
+      bootstrap.Modal.getInstance($('#addAdminModal')).hide();
+      notify(`Created admin ${username}`);
+      await loadAdmins();
+    });
+
+    // Global refresh
+    $('#refreshAll').addEventListener('click', async () => { await Promise.all([loadBlocks(), loadAdmins()]); notify('Refreshed'); });
+
+    // Init
+    (async function () { await Promise.all([loadBlocks(), loadAdmins()]); })();
+  </script>
+</body>
+</html>
+{% endblock %}
