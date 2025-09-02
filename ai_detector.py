@@ -1,181 +1,255 @@
-
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-ai_detector.py
---------------
-Trains & caches a multi-class text model from ONLY XLSX payloads:
+AI Detector Module (precise, XLSX-only)
+---------------------------------------
+Trains a multi-class model from ONLY the provided Excel payload files:
 
-  payloads/benign.xlsx -> 0
-  payloads/sqli.xlsx   -> 1
-  payloads/xss.xlsx    -> 2
-  payloads/ddos.xlsx   -> 3
+  payloads/benign.xlsx  -> label 0 (benign)
+  payloads/sqli.xlsx    -> label 1 (SQLi)
+  payloads/xss.xlsx     -> label 2 (XSS)
+  payloads/ddos.xlsx    -> label 3 (DDoS)
 
-- Vectorizer: TF-IDF char_wb n-grams (3–5)
-- Classifier: LinearSVC (with class_weight)
-- Thread-safe lazy init + joblib cache
-- Defensive Excel engine handling (openpyxl / python-calamine / xlrd)
+Each file MUST contain examples in the FIRST column. No default/fallback data
+is used. If a file is missing or empty, training will raise a clear error.
 
-Env:
-  AI_PAYLOAD_DIR, AI_MODEL_PATH, AI_DETECTOR_TUNE, AI_RATE_MAX_CALLS, AI_RATE_PERIOD
+Model:
+  - TfidfVectorizer (character n-grams, 3–5) with lowercase normalization
+  - LinearSVC (strong baseline for short, obfuscated payloads)
+  - Optional hyperparameter tuning via GridSearchCV if env AI_DETECTOR_TUNE=1
+
+API:
+  - detect_attack(data: str) -> int
+        0 = benign, 1 = SQLi, 2 = XSS, 3 = DDoS
+
+Operational niceties:
+  - Thread-safe lazy loading/training
+  - On-disk caching: ai_detector_model.pkl
+  - Simple rate-limit: max 100 calls/minute (tunable)
 """
 
 import os
 import time
 import threading
-from functools import wraps
-from typing import List, Tuple
-
 import joblib
-import numpy as np
 import pandas as pd
+from typing import List, Tuple
+from functools import wraps
+
 from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.svm import LinearSVC
 from sklearn.model_selection import GridSearchCV
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.exceptions import NotFittedError
+import numpy as np
 
-PAYLOAD_DIR = os.getenv("AI_PAYLOAD_DIR", "payloads")
+# ---------------------------
+# Config
+# ---------------------------
+PAYLOAD_DIR = os.environ.get("AI_PAYLOAD_DIR", "payloads")
 FILE_MAP = {
     0: os.path.join(PAYLOAD_DIR, "benign.xlsx"),
     1: os.path.join(PAYLOAD_DIR, "sqli.xlsx"),
     2: os.path.join(PAYLOAD_DIR, "xss.xlsx"),
     3: os.path.join(PAYLOAD_DIR, "ddos.xlsx"),
 }
-MODEL_PATH = os.getenv("AI_MODEL_PATH", "ai_detector_model.pkl")
-TUNE = os.getenv("AI_DETECTOR_TUNE", "0") == "1"
+MODEL_PATH = os.environ.get("AI_MODEL_PATH", "ai_detector_model.pkl")
+TUNE = os.environ.get("AI_DETECTOR_TUNE", "0") == "1"
 
-MAX_CALLS = int(os.getenv("AI_RATE_MAX_CALLS", "100"))
-PERIOD_SEC = int(os.getenv("AI_RATE_PERIOD", "60"))
+# Rate limits
+MAX_CALLS = int(os.environ.get("AI_RATE_MAX_CALLS", "100"))
+PERIOD_SEC = int(os.environ.get("AI_RATE_PERIOD", "60"))
 
+# Thread-safety
 _model_lock = threading.Lock()
-_model = None
+_model = None  # cached classifier pipeline
 
+
+# ---------------------------
+# Rate Limiter Decorator
+# ---------------------------
 def rate_limited(max_calls: int, period: int):
-    def deco(fn):
+    def decorator(func):
         calls = []
         lock = threading.Lock()
-        @wraps(fn)
-        def wrapper(*a, **k):
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
             nonlocal calls
             now = time.time()
             with lock:
+                # keep only calls within window
                 calls = [t for t in calls if now - t < period]
                 if len(calls) >= max_calls:
-                    raise RuntimeError("ai_detector rate limit exceeded")
+                    raise RuntimeError(f"Rate limit exceeded for {func.__name__}")
                 calls.append(now)
-            return fn(*a, **k)
+            return func(*args, **kwargs)
         return wrapper
-    return deco
+    return decorator
 
-def _available_engines():
-    engines = []
-    try:
-        import openpyxl  # noqa
-        engines.append("openpyxl")
-    except Exception:
-        pass
-    try:
-        import calamine  # noqa
-        engines.append("calamine")
-    except Exception:
-        pass
-    try:
-        import xlrd  # noqa
-        engines.append("xlrd")
-    except Exception:
-        pass
-    return engines
 
-def _read_first_col(path: str) -> List[str]:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Missing required file: {path}")
-    engines = _available_engines()
-    if not engines:
-        raise RuntimeError("No Excel engine: install openpyxl or python-calamine or xlrd")
-    last_err = None
-    for eng in engines:
-        try:
-            df = pd.read_excel(path, engine=eng, usecols=[0])
-            s = df.iloc[:,0].dropna().astype(str).str.strip()
-            items = [x for x in s.tolist() if x]
-            if not items:
-                raise ValueError(f"{path} has no non-empty examples in col 0")
-            return items
-        except Exception as e:
-            last_err = e
-    raise RuntimeError(f"Failed reading {path}: {last_err}")
+# ---------------------------
+# Data Loading (XLSX only)
+# ---------------------------
+def _read_first_column(xlsx_path: str) -> List[str]:
+    if not os.path.exists(xlsx_path):
+        raise FileNotFoundError(
+            f"Required payload file not found: {xlsx_path}\n"
+            f"Expected files: {list(FILE_MAP.values())}"
+        )
+    try:
+        df = pd.read_excel(xlsx_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to read {xlsx_path}: {e}")
+    if df.shape[1] < 1:
+        raise ValueError(f"{xlsx_path} has no columns. Put examples in the FIRST column.")
+    series = df.iloc[:, 0].dropna()
+    examples = [str(x) for x in series.tolist() if str(x).strip()]
+    if not examples:
+        raise ValueError(f"{xlsx_path} has no non-empty examples in the first column.")
+    return examples
 
-def _load_data() -> Tuple[List[str], List[int]]:
-    texts, labels = [], []
-    for label, f in FILE_MAP.items():
-        items = _read_first_col(f)
-        texts.extend(items)
-        labels.extend([label]*len(items))
+
+def _load_dataset() -> Tuple[List[str], List[int]]:
+    texts: List[str] = []
+    labels: List[int] = []
+    for label, path in FILE_MAP.items():
+        samples = _read_first_column(path)
+        texts.extend(samples)
+        labels.extend([label] * len(samples))
     return texts, labels
 
-def _make_pipeline() -> Pipeline:
-    vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(3,5), lowercase=True, sublinear_tf=True)
-    clf = LinearSVC(random_state=42)
-    return Pipeline([("tfidf", vec), ("clf", clf)])
 
-def _train() -> Pipeline:
-    X, y = _load_data()
-    classes = np.unique(y)
-    weights = compute_class_weight("balanced", classes=classes, y=y)
-    cw = {int(c): float(w) for c, w in zip(classes, weights)}
+# ---------------------------
+# Training
+# ---------------------------
+def _make_pipeline() -> Pipeline:
+    """
+    Char n-grams are robust to obfuscation, spacing, and mixed case.
+    """
+    vectorizer = TfidfVectorizer(
+        analyzer="char_wb",
+        ngram_range=(3, 5),
+        lowercase=True,
+        min_df=1,
+        max_df=1.0,
+        strip_accents=None,
+        sublinear_tf=True,
+    )
+    clf = LinearSVC()  # fast & strong for text classification
+    return Pipeline([("tfidf", vectorizer), ("clf", clf)])
+
+
+def _train_model() -> Pipeline:
+    texts, labels = _load_dataset()
+
+    # Class weights (balanced) – helpful if classes are imbalanced.
+    classes = np.unique(labels)
+    weights = compute_class_weight(class_weight="balanced", classes=classes, y=labels)
+    class_weight = {int(c): float(w) for c, w in zip(classes, weights)}
+
+    base = _make_pipeline()
 
     if TUNE:
-        base = _make_pipeline()
-        grid = {
-            "tfidf__ngram_range": [(3,5), (2,5), (3,6)],
+        # Lightweight grid – expand if you have more data/time
+        param_grid = {
+            "tfidf__ngram_range": [(3, 5), (2, 5), (3, 6)],
             "clf__C": [0.5, 1.0, 2.0],
-            "clf__class_weight": [cw],
         }
-        model = GridSearchCV(base, grid, scoring="f1_macro", cv=3, n_jobs=-1).fit(X, y).best_estimator_
+        tuned = GridSearchCV(
+            base,
+            param_grid=param_grid,
+            scoring="f1_macro",
+            n_jobs=-1,
+            cv=3,
+            verbose=0,
+        )
+        tuned.fit(texts, labels)
+        model = tuned.best_estimator_
     else:
-        vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(3,5), lowercase=True, sublinear_tf=True)
-        clf = LinearSVC(C=1.0, class_weight=cw, random_state=42)
-        model = Pipeline([("tfidf", vec), ("clf", clf)]).fit(X, y)
+        # Attach class_weight to LinearSVC by refitting a new instance
+        # (Pipeline doesn’t expose clf init; rebuild with same vectorizer)
+        vectorizer = base.named_steps["tfidf"]
+        clf = LinearSVC(C=1.0, class_weight=class_weight)
+        model = Pipeline([("tfidf", vectorizer), ("clf", clf)])
+        model.fit(texts, labels)
 
-    joblib.dump({"model": model, "meta": {"classes": [0,1,2,3], "timestamp": time.time()}}, MODEL_PATH)
+    # Persist
+    joblib.dump(
+        {
+            "model": model,
+            "meta": {
+                "version": 2,
+                "classes": sorted(list(set(labels))),
+                "files": FILE_MAP,
+                "tuned": TUNE,
+                "timestamp": time.time(),
+            },
+        },
+        MODEL_PATH,
+    )
     return model
+
 
 def _load_or_train() -> Pipeline:
     global _model
     with _model_lock:
         if _model is not None:
             return _model
+
+        needs_train = True
         if os.path.exists(MODEL_PATH):
             try:
                 payload = joblib.load(MODEL_PATH)
-                m = payload.get("model")
+                model = payload.get("model", None)
                 meta = payload.get("meta", {})
-                if m is not None and set(meta.get("classes", [])) == {0,1,2,3}:
-                    _model = m
+                # Basic sanity checks
+                classes = set(meta.get("classes", []))
+                expected = {0, 1, 2, 3}
+                if model is not None and classes == expected:
+                    _model = model
                     return _model
             except Exception:
+                # ignore and retrain
                 pass
-        _model = _train()
-        return _model
 
+        if needs_train:
+            _model = _train_model()
+            return _model
+
+
+# ---------------------------
+# Public API
+# ---------------------------
 @rate_limited(MAX_CALLS, PERIOD_SEC)
 def detect_attack(data: str) -> int:
+    """
+    Returns:
+        0 benign, 1 SQLi, 2 XSS, 3 DDoS
+    """
     try:
-        m = _load_or_train()
-        txt = "" if data is None else str(data)
-        if not txt.strip():
+        model = _load_or_train()
+        text = "" if data is None else str(data)
+        # Fast path: empty or whitespace-only payloads are benign
+        if not text.strip():
             return 0
-        return int(m.predict([txt])[0])
+        return int(model.predict([text])[0])
     except NotFittedError:
-        _train()
-        m = _load_or_train()
-        return int(m.predict([str(data)])[0])
-    except Exception:
+        # Shouldn't happen due to _load_or_train(), but be safe
+        _train_model()
+        model = _load_or_train()
+        return int(model.predict([str(data)])[0])
+    except Exception as e:
+        # In production you might log this; default to benign to avoid lockouts
+        # when the detector itself fails.
+        # print(f"[ai_detector] detection error: {e}")
         return 0
 
+
 if __name__ == "__main__":
-    print("0=benign, 1=SQLi, 2=XSS, 3=DDoS")
-    print("engines:", _available_engines())
-    print("predict('select * from users') ->", detect_attack("select * from users"))
+    # Quick manual smoke test
+    print("Detector label map: 0=benign, 1=SQLi, 2=XSS, 3=DDoS")
+    print("Loading/training model from XLSX files...")
+    m = _load_or_train()
+    for t in ["Hello", "<script>alert(1)</script>", "SELECT * FROM users", "GET / " * 30]:
+        print(repr(t[:60]), "=>", detect_attack(t))
