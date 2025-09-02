@@ -1,255 +1,177 @@
 #!/usr/bin/env python3
-"""
-AI Detector Module (precise, XLSX-only)
----------------------------------------
-Trains a multi-class model from ONLY the provided Excel payload files:
+# ip_blocker_db.py
+import os, time, logging, shutil, subprocess, threading
+from datetime import datetime, timedelta, timezone
+from ipaddress import ip_address
 
-  payloads/benign.xlsx  -> label 0 (benign)
-  payloads/sqli.xlsx    -> label 1 (SQLi)
-  payloads/xss.xlsx     -> label 2 (XSS)
-  payloads/ddos.xlsx    -> label 3 (DDoS)
+from mysql_db import get_conn, init_mysql
 
-Each file MUST contain examples in the FIRST column. No default/fallback data
-is used. If a file is missing or empty, training will raise a clear error.
+logger = logging.getLogger("ip_blocker_db")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    h = logging.StreamHandler()
+    h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
+    logger.addHandler(h)
 
-Model:
-  - TfidfVectorizer (character n-grams, 3–5) with lowercase normalization
-  - LinearSVC (strong baseline for short, obfuscated payloads)
-  - Optional hyperparameter tuning via GridSearchCV if env AI_DETECTOR_TUNE=1
+DEFAULT_TTL = int(os.getenv("BLOCK_TTL_SECONDS", "300"))  # 5 min
+SWEEP_EVERY = int(os.getenv("BLOCK_SWEEP_SECONDS", "30"))
+OS_MODE = os.getenv("FW_OS_MODE", "auto")  # auto | nft | ipset | off
 
-API:
-  - detect_attack(data: str) -> int
-        0 = benign, 1 = SQLi, 2 = XSS, 3 = DDoS
+class OSEnforcer:
+    def __init__(self, mode: str = "auto"):
+        self.mode = self._detect_mode(mode)
+        self._ensure_installed()
 
-Operational niceties:
-  - Thread-safe lazy loading/training
-  - On-disk caching: ai_detector_model.pkl
-  - Simple rate-limit: max 100 calls/minute (tunable)
-"""
+    def _detect_mode(self, mode: str) -> str:
+        if mode in ("nft", "ipset", "off"):
+            return mode
+        # auto
+        if shutil.which("nft"):
+            return "nft"
+        if shutil.which("ipset") and shutil.which("iptables"):
+            return "ipset"
+        return "off"
 
-import os
-import time
-import threading
-import joblib
-import pandas as pd
-from typing import List, Tuple
-from functools import wraps
+    def _run(self, *args):
+        try:
+            return subprocess.run(args, check=True, capture_output=True, text=True)
+    # noqa: E701
+        except subprocess.CalledProcessError as e:
+            logger.warning("Command failed: %s\nstdout=%s\nstderr=%s", " ".join(args), e.stdout, e.stderr)
+            return None
 
-from sklearn.pipeline import Pipeline
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.svm import LinearSVC
-from sklearn.model_selection import GridSearchCV
-from sklearn.utils.class_weight import compute_class_weight
-from sklearn.exceptions import NotFittedError
-import numpy as np
+    def _ensure_installed(self):
+        if self.mode == "nft":
+            # Create table/sets/chain/rules if missing
+            self._run("nft", "add", "table", "inet", "filter")  # harmless if exists
+            # IPv4 set
+            self._run("nft", "add", "set", "inet", "filter", "fw_blocked",
+                      "{", "type", "ipv4_addr", ";", "flags", "timeout", ";", "}",)
+            # IPv6 set
+            self._run("nft", "add", "set", "inet", "filter", "fw6_blocked",
+                      "{", "type", "ipv6_addr", ";", "flags", "timeout", ";", "}",)
+            # input chain and drop rules
+            self._run("nft", "add", "chain", "inet", "filter", "input",
+                      "{", "type", "filter", "hook", "input", "priority", "0", ";", "policy", "accept", ";", "}",)
+            self._run("nft", "add", "rule", "inet", "filter", "input", "ip", "saddr", "@fw_blocked", "drop")
+            self._run("nft", "add", "rule", "inet", "filter", "input", "ip6", "saddr", "@fw6_blocked", "drop")
+        elif self.mode == "ipset":
+            # Create set + iptables jump
+            self._run("ipset", "create", "fw_blocked", "hash:ip", "timeout", "0")  # 0 timeout here; per-entry later
+            self._run("iptables", "-I", "INPUT", "-m", "set", "--match-set", "fw_blocked", "src", "-j", "DROP")
+            if shutil.which("ip6tables"):
+                self._run("ip6tables", "-I", "INPUT", "-m", "set", "--match-set", "fw_blocked", "src", "-j", "DROP")
 
-# ---------------------------
-# Config
-# ---------------------------
-PAYLOAD_DIR = os.environ.get("AI_PAYLOAD_DIR", "payloads")
-FILE_MAP = {
-    0: os.path.join(PAYLOAD_DIR, "benign.xlsx"),
-    1: os.path.join(PAYLOAD_DIR, "sqli.xlsx"),
-    2: os.path.join(PAYLOAD_DIR, "xss.xlsx"),
-    3: os.path.join(PAYLOAD_DIR, "ddos.xlsx"),
-}
-MODEL_PATH = os.environ.get("AI_MODEL_PATH", "ai_detector_model.pkl")
-TUNE = os.environ.get("AI_DETECTOR_TUNE", "0") == "1"
+    def add(self, ip: str, ttl: int):
+        if self.mode == "off":
+            return
+        try:
+            addr = ip_address(ip)
+        except ValueError:
+            logger.warning("Invalid IP for OS enforce: %s", ip)
+            return
+        if self.mode == "nft":
+            if addr.version == 4:
+                self._run("nft", "add", "element", "inet", "filter", "fw_blocked",
+                          "{", ip, "timeout", f"{ttl}s", "}")
+            else:
+                self._run("nft", "add", "element", "inet", "filter", "fw6_blocked",
+                          "{", ip, "timeout", f"{ttl}s", "}")
+        elif self.mode == "ipset":
+            # ipset expects seconds TTL per add
+            self._run("ipset", "add", "fw_blocked", ip, "timeout", str(ttl))
 
-# Rate limits
-MAX_CALLS = int(os.environ.get("AI_RATE_MAX_CALLS", "100"))
-PERIOD_SEC = int(os.environ.get("AI_RATE_PERIOD", "60"))
+    def remove(self, ip: str):
+        if self.mode == "off":
+            return
+        try:
+            addr = ip_address(ip)
+        except ValueError:
+            return
+        if self.mode == "nft":
+            if addr.version == 4:
+                self._run("nft", "delete", "element", "inet", "filter", "fw_blocked", "{", ip, "}")
+            else:
+                self._run("nft", "delete", "element", "inet", "filter", "fw6_blocked", "{", ip, "}")
+        elif self.mode == "ipset":
+            self._run("ipset", "del", "fw_blocked", ip)
 
-# Thread-safety
-_model_lock = threading.Lock()
-_model = None  # cached classifier pipeline
+class MySQLIPBlocker:
+    def __init__(self, default_ttl: int = DEFAULT_TTL):
+        init_mysql()
+        self.default_ttl = default_ttl
+        self.enforcer = OSEnforcer(OS_MODE)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._sweeper, name="block_sweeper", daemon=True)
+        self._thread.start()
 
+    def block(self, ip: str, ttl: int = None, reason: str = None, created_by: str = "waf") -> None:
+        ttl = int(ttl) if ttl is not None else self.default_ttl
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl)
+        sql = """
+        INSERT INTO blocked_ips (ip, reason, created_by, enforced, expires_at)
+        VALUES (%s,%s,%s,1,%s)
+        ON DUPLICATE KEY UPDATE
+          reason=VALUES(reason),
+          created_by=VALUES(created_by),
+          enforced=1,
+          expires_at=VALUES(expires_at)
+        """
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(sql, (ip, (reason or "")[:255], created_by, expires_at.replace(tzinfo=None)))
+        # OS-level
+        self.enforcer.add(ip, ttl)
 
-# ---------------------------
-# Rate Limiter Decorator
-# ---------------------------
-def rate_limited(max_calls: int, period: int):
-    def decorator(func):
-        calls = []
-        lock = threading.Lock()
+    def unblock(self, ip: str) -> None:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE blocked_ips SET enforced=0, expires_at=NULL WHERE ip=%s", (ip,))
+        self.enforcer.remove(ip)
 
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            nonlocal calls
-            now = time.time()
-            with lock:
-                # keep only calls within window
-                calls = [t for t in calls if now - t < period]
-                if len(calls) >= max_calls:
-                    raise RuntimeError(f"Rate limit exceeded for {func.__name__}")
-                calls.append(now)
-            return func(*args, **kwargs)
-        return wrapper
-    return decorator
+    def is_blocked(self, ip: str) -> bool:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT enforced, expires_at FROM blocked_ips WHERE ip=%s",
+                (ip,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return False
+        enforced, expires_at = row
+        if not enforced:
+            return False
+        if expires_at is None:
+            return True
+        # treat DB datetime as naive -> UTC
+        if datetime.utcnow() > expires_at:
+            # lazily drop past-expired
+            self.unblock(ip)
+            return False
+        return True
 
-
-# ---------------------------
-# Data Loading (XLSX only)
-# ---------------------------
-def _read_first_column(xlsx_path: str) -> List[str]:
-    if not os.path.exists(xlsx_path):
-        raise FileNotFoundError(
-            f"Required payload file not found: {xlsx_path}\n"
-            f"Expected files: {list(FILE_MAP.values())}"
-        )
-    try:
-        df = pd.read_excel(xlsx_path)
-    except Exception as e:
-        raise RuntimeError(f"Failed to read {xlsx_path}: {e}")
-    if df.shape[1] < 1:
-        raise ValueError(f"{xlsx_path} has no columns. Put examples in the FIRST column.")
-    series = df.iloc[:, 0].dropna()
-    examples = [str(x) for x in series.tolist() if str(x).strip()]
-    if not examples:
-        raise ValueError(f"{xlsx_path} has no non-empty examples in the first column.")
-    return examples
-
-
-def _load_dataset() -> Tuple[List[str], List[int]]:
-    texts: List[str] = []
-    labels: List[int] = []
-    for label, path in FILE_MAP.items():
-        samples = _read_first_column(path)
-        texts.extend(samples)
-        labels.extend([label] * len(samples))
-    return texts, labels
-
-
-# ---------------------------
-# Training
-# ---------------------------
-def _make_pipeline() -> Pipeline:
-    """
-    Char n-grams are robust to obfuscation, spacing, and mixed case.
-    """
-    vectorizer = TfidfVectorizer(
-        analyzer="char_wb",
-        ngram_range=(3, 5),
-        lowercase=True,
-        min_df=1,
-        max_df=1.0,
-        strip_accents=None,
-        sublinear_tf=True,
-    )
-    clf = LinearSVC()  # fast & strong for text classification
-    return Pipeline([("tfidf", vectorizer), ("clf", clf)])
-
-
-def _train_model() -> Pipeline:
-    texts, labels = _load_dataset()
-
-    # Class weights (balanced) – helpful if classes are imbalanced.
-    classes = np.unique(labels)
-    weights = compute_class_weight(class_weight="balanced", classes=classes, y=labels)
-    class_weight = {int(c): float(w) for c, w in zip(classes, weights)}
-
-    base = _make_pipeline()
-
-    if TUNE:
-        # Lightweight grid – expand if you have more data/time
-        param_grid = {
-            "tfidf__ngram_range": [(3, 5), (2, 5), (3, 6)],
-            "clf__C": [0.5, 1.0, 2.0],
-        }
-        tuned = GridSearchCV(
-            base,
-            param_grid=param_grid,
-            scoring="f1_macro",
-            n_jobs=-1,
-            cv=3,
-            verbose=0,
-        )
-        tuned.fit(texts, labels)
-        model = tuned.best_estimator_
-    else:
-        # Attach class_weight to LinearSVC by refitting a new instance
-        # (Pipeline doesn’t expose clf init; rebuild with same vectorizer)
-        vectorizer = base.named_steps["tfidf"]
-        clf = LinearSVC(C=1.0, class_weight=class_weight)
-        model = Pipeline([("tfidf", vectorizer), ("clf", clf)])
-        model.fit(texts, labels)
-
-    # Persist
-    joblib.dump(
-        {
-            "model": model,
-            "meta": {
-                "version": 2,
-                "classes": sorted(list(set(labels))),
-                "files": FILE_MAP,
-                "tuned": TUNE,
-                "timestamp": time.time(),
-            },
-        },
-        MODEL_PATH,
-    )
-    return model
-
-
-def _load_or_train() -> Pipeline:
-    global _model
-    with _model_lock:
-        if _model is not None:
-            return _model
-
-        needs_train = True
-        if os.path.exists(MODEL_PATH):
+    def _sweeper(self):
+        while not self._stop.is_set():
             try:
-                payload = joblib.load(MODEL_PATH)
-                model = payload.get("model", None)
-                meta = payload.get("meta", {})
-                # Basic sanity checks
-                classes = set(meta.get("classes", []))
-                expected = {0, 1, 2, 3}
-                if model is not None and classes == expected:
-                    _model = model
-                    return _model
-            except Exception:
-                # ignore and retrain
-                pass
+                self._expire_pass()
+            except Exception as e:
+                logger.warning("sweeper error: %s", e)
+            self._stop.wait(SWEEP_EVERY)
 
-        if needs_train:
-            _model = _train_model()
-            return _model
+    def _expire_pass(self):
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT ip FROM blocked_ips WHERE enforced=1 AND expires_at IS NOT NULL AND expires_at < UTC_TIMESTAMP()"
+            )
+            rows = cur.fetchall() or []
+        for (ip,) in rows:
+            try:
+                self.unblock(ip)
+            except Exception as e:
+                logger.warning("failed to unblock expired %s: %s", ip, e)
 
-
-# ---------------------------
-# Public API
-# ---------------------------
-@rate_limited(MAX_CALLS, PERIOD_SEC)
-def detect_attack(data: str) -> int:
-    """
-    Returns:
-        0 benign, 1 SQLi, 2 XSS, 3 DDoS
-    """
-    try:
-        model = _load_or_train()
-        text = "" if data is None else str(data)
-        # Fast path: empty or whitespace-only payloads are benign
-        if not text.strip():
-            return 0
-        return int(model.predict([text])[0])
-    except NotFittedError:
-        # Shouldn't happen due to _load_or_train(), but be safe
-        _train_model()
-        model = _load_or_train()
-        return int(model.predict([str(data)])[0])
-    except Exception as e:
-        # In production you might log this; default to benign to avoid lockouts
-        # when the detector itself fails.
-        # print(f"[ai_detector] detection error: {e}")
-        return 0
-
-
-if __name__ == "__main__":
-    # Quick manual smoke test
-    print("Detector label map: 0=benign, 1=SQLi, 2=XSS, 3=DDoS")
-    print("Loading/training model from XLSX files...")
-    m = _load_or_train()
-    for t in ["Hello", "<script>alert(1)</script>", "SELECT * FROM users", "GET / " * 30]:
-        print(repr(t[:60]), "=>", detect_attack(t))
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=2)
