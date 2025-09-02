@@ -1,0 +1,402 @@
+{% set title = page_title or "Statistics" %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }} – Firewall</title>
+
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+
+  <style>
+    :root{
+      --dark-bg:#181d26; --card-bg:rgba(24,29,38,.95); --border-dark:#233043;
+      --text-primary:#d6e3f3; --text-secondary:#a7c7e7; --text-muted:#b9c9d5;
+      --accent-blue:#54aaff; --navbar-bg:rgba(18,23,32,.98);
+      --c-allowed:#5bbcff;   /* lines/bars */
+      --c-blocked:#ff6b81;
+      --c-total:#aee2ff;     /* bright total number */
+      --grid:#2b3b52;
+    }
+
+    html,body{background:radial-gradient(ellipse at top left,#232b3b 30%,#181d26 90%);color:var(--text-primary)}
+    body{font-family:'Segoe UI',Arial,sans-serif;margin:0;min-height:100vh;padding-top:80px}
+
+    /* Navbar */
+    .navbar-custom{background:var(--navbar-bg);backdrop-filter:blur(10px);border-bottom:1.5px solid var(--border-dark);box-shadow:0 2px 20px rgba(0,0,0,.3)}
+    .navbar-brand{color:var(--accent-blue)!important;font-weight:700;font-size:1.4rem;letter-spacing:.03em;text-shadow:0 2px 12px rgba(84,170,255,.3)}
+    .navbar-brand:hover{color:#7bb8ff!important;text-shadow:0 2px 16px rgba(84,170,255,.5);transition:all .3s ease}
+    .navbar-nav .nav-link{color:var(--text-secondary)!important;font-weight:600;padding:.5rem 1rem!important;border-radius:.5rem;transition:all .25s ease}
+    .navbar-nav .nav-link:hover{color:var(--text-primary)!important;background-color:rgba(84,170,255,.1);transform:translateY(-1px)}
+    .navbar-nav .nav-link.active{color:var(--text-primary)!important;background-color:rgba(84,170,255,.16)}
+    .dropdown-menu{background:var(--card-bg);border:1.5px solid var(--border-dark)}
+    .dropdown-item{color:var(--text-primary)} .dropdown-item:hover{background:rgba(84,170,255,.12)}
+    .navbar-toggler{border-color:rgba(255,255,255,.25)}
+    .navbar-toggler-icon{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3E%3Cpath stroke='rgba(255,255,255,.85)' stroke-linecap='round' stroke-width='2' d='M4 7h22M4 15h22M4 23h22'/%3E%3C/svg%3E")}
+
+    /* Cards */
+    .card-custom{background:var(--card-bg);border:1.5px solid var(--border-dark);border-radius:1rem;box-shadow:0 4px 32px rgba(30,41,59,.27)}
+    .card-title-custom{color:#cfe0ff;font-size:1.125rem;font-weight:700;letter-spacing:.02em;margin-bottom:.5rem}
+    .badge-soft{background:#18355f;border:1px solid #2f63a6;color:#e6f0ff}
+
+    /* Summary cards */
+    .summary-card{min-height:170px}
+    .summary-card .label{color:#f4f9ff}
+    .summary-card .stat-value{font-size:1.8rem;font-weight:900;color:#f7fbff;text-shadow:0 0 6px rgba(255,255,255,.06)}
+    .summary-card .stat-value.stat-total{color:var(--c-total);text-shadow:0 0 10px rgba(84,170,255,.18)}
+    .summary-card .text-success{color:#34e27a!important;text-shadow:0 0 10px rgba(52,226,122,.12)}
+    .summary-card .text-danger{color:var(--c-blocked)!important;text-shadow:0 0 10px rgba(255,107,129,.12)}
+
+    /* Charts (medium sized; never balloon) */
+    .chart-wrap{position:relative;height:260px}
+    .chart-wrap--bar{position:relative;height:240px}
+    .chart-wrap canvas{position:absolute;inset:0;width:100%!important;height:100%!important}
+  </style>
+</head>
+<body>
+  <!-- Navbar -->
+  <nav class="navbar navbar-expand-lg navbar-dark fixed-top navbar-custom">
+    <div class="container-fluid">
+      <a class="navbar-brand d-flex align-items-center" href="{{ url_for('dashboard') }}">
+        <span class="me-2" style="font-size:1.4rem;">🔥</span>Firewall Dashboard
+      </a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"><span class="navbar-toggler-icon"></span></button>
+      <div class="collapse navbar-collapse" id="navbarNav">
+        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}#monitoring"><i class="bi bi-speedometer2 me-1"></i> Monitoring</a></li>
+          <li class="nav-item"><a class="nav-link active" href="{{ url_for('statistics_page') }}"><i class="bi bi-bar-chart me-1"></i> Statistics</a></li>
+          <li class="nav-item"><a class="nav-link" href="{{ url_for('settings_page') }}"><i class="bi bi-gear me-1"></i> Settings</a></li>
+        </ul>
+        <div class="navbar-nav">
+          <div class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" role="button" data-bs-toggle="dropdown"><span class="me-2">👤</span> Admin</a>
+            <ul class="dropdown-menu dropdown-menu-end">
+              <li><a class="dropdown-item" href="{{ url_for('settings_page') }}">Settings</a></li>
+              <li><hr class="dropdown-divider"></li>
+              <li>
+                <form method="post" action="{{ url_for('logout') }}"><button class="dropdown-item" type="submit"><span class="me-1">🚪</span> Logout</button></form>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container py-4">
+    <div class="d-flex align-items-center justify-content-between mb-4">
+      <h2 class="mb-0" style="color:var(--accent-blue);letter-spacing:.02em;"><i class="bi bi-bar-chart me-2"></i>Statistics</h2>
+      <div class="d-flex align-items-center gap-2">
+        <div class="btn-group" role="group">
+          <button class="btn btn-sm btn-outline-light" data-range="1">1h</button>
+          <button class="btn btn-sm btn-outline-light active" data-range="24">24h</button>
+          <button class="btn btn-sm btn-outline-light" data-range="168">7d</button>
+        </div>
+        <span class="badge badge-soft" id="sinceLabel">Last 24 hours</span>
+      </div>
+    </div>
+
+    <!-- Summary -->
+    <div class="row g-4">
+      <div class="col-12 col-md-4">
+        <div class="card card-custom p-3 summary-card">
+          <div class="card-title-custom">Overall</div>
+          <div class="d-flex justify-content-between"><div class="label">Total</div><div class="stat-value stat-total" id="overall_total">0</div></div>
+          <div class="d-flex justify-content-between"><div class="label">Allowed</div><div class="stat-value text-success" id="overall_allowed">0</div></div>
+          <div class="d-flex justify-content-between"><div class="label">Blocked</div><div class="stat-value text-danger" id="overall_blocked">0</div></div>
+        </div>
+      </div>
+
+      <div class="col-12 col-md-4">
+        <div class="card card-custom p-3 summary-card">
+          <div class="card-title-custom">Last 24h</div>
+          <div class="d-flex justify-content-between"><div class="label">Total</div><div class="stat-value stat-total" id="day_total">0</div></div>
+          <div class="d-flex justify-content-between"><div class="label">Allowed</div><div class="stat-value text-success" id="day_allowed">0</div></div>
+          <div class="d-flex justify-content-between"><div class="label">Blocked</div><div class="stat-value text-danger" id="day_blocked">0</div></div>
+        </div>
+      </div>
+
+      <div class="col-12 col-md-4">
+        <div class="card card-custom p-3 summary-card">
+          <div class="card-title-custom">Top Reason (24h)</div>
+          <div class="d-flex justify-content-between">
+            <div class="label" id="top_reason">—</div>
+            <div class="stat-value" id="top_reason_count">0</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Charts -->
+    <div class="row g-4 mt-1">
+      <div class="col-12">
+        <div class="card card-custom p-3">
+          <div class="card-title-custom d-flex justify-content-between align-items-center">
+            <span>Traffic over time</span><small class="text-muted">Allowed vs Blocked</small>
+          </div>
+          <div class="chart-wrap"><canvas id="chart_timeseries"></canvas></div>
+        </div>
+      </div>
+
+      <div class="col-12 col-lg-6">
+        <div class="card card-custom p-3">
+          <div class="card-title-custom">Top Blocked IPs</div>
+          <div class="chart-wrap chart-wrap--bar"><canvas id="chart_top_ips"></canvas></div>
+        </div>
+      </div>
+
+      <div class="col-12 col-lg-6">
+        <div class="card card-custom p-3">
+          <div class="card-title-custom">Top Block Reasons</div>
+          <div class="chart-wrap chart-wrap--bar"><canvas id="chart_top_reasons"></canvas></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <script>
+    // Chart sizing
+    Chart.defaults.responsive = true;
+    Chart.defaults.maintainAspectRatio = false;
+
+    const $  = (q,r=document)=>r.querySelector(q);
+    const $$ = (q,r=document)=>[...r.querySelectorAll(q)];
+    const fmtTime = ts => new Date(ts*1000).toLocaleString();
+    const num = n => (n ?? 0).toLocaleString();
+
+    let rangeHours = 24;
+    let tsChart, topIpsChart, topReasonsChart;
+
+    // --- Color helpers
+    const cssVar = (name, fb) => (getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fb);
+    const HEX = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i;
+    function rgba(hex, a){
+      const m = HEX.exec(hex);
+      if(!m) return `rgba(255,255,255,${a})`;
+      const r = parseInt(m[1],16), g = parseInt(m[2],16), b = parseInt(m[3],16);
+      return `rgba(${r},${g},${b},${a})`;
+    }
+    function makeGradient(ctx2d, color){
+      const h = (ctx2d.canvas && ctx2d.canvas.clientHeight) || 260;
+      const g = ctx2d.createLinearGradient(0, 0, 0, h);
+      g.addColorStop(0, rgba(color, .22));
+      g.addColorStop(1, rgba(color, .02));
+      return g;
+    }
+
+    // --- Prettify reason without changing layout
+    function prettifyReason(raw) {
+      if (!raw || raw === '(none)') return '—';
+      let s = String(raw).trim();
+
+      // prefix handling
+      let prefix = '';
+      if (s.toLowerCase().startsWith('ai:'))   { prefix = 'AI: ';   s = s.slice(3); }
+      if (s.toLowerCase().startsWith('rule:')) { prefix = 'Rule: '; s = s.slice(5); }
+
+      s = s.replace(/_/g, ' ').trim();
+
+      const map = {
+        'db active block': 'Active DB Block',
+        'manual block': 'Manual Block',
+        'ddos hard': 'DDoS (Hard Block)',
+        'rate limit': 'Rate Limited',
+        'network packet': 'Network IPS',
+        'safe get': 'Safe GET',
+        'authenticated': 'Authenticated',
+        'admin ip': 'Admin IP',
+        'passed': 'Allowed',
+        'sql injection': 'SQL Injection',
+        'path traversal': 'Path Traversal',
+        'xss': 'XSS',
+      };
+
+      const key = s.toLowerCase();
+      const pretty = map[key] || s.replace(/\b\w/g, c => c.toUpperCase());
+      return prefix + pretty;
+    }
+
+    // --- Charts (2D context)
+    function lineChart(canvasEl, labels, allowed, blocked){
+      const ctx2d = canvasEl.getContext('2d');
+      const allowedColor = cssVar('--c-allowed', '#5bbcff');
+      const blockedColor = cssVar('--c-blocked', '#ff6b81');
+      const gAllowed = makeGradient(ctx2d, allowedColor);
+      const gBlocked = makeGradient(ctx2d, blockedColor);
+
+      return new Chart(ctx2d,{
+        type:'line',
+        data:{
+          labels,
+          datasets:[
+            {label:'Allowed', data:allowed,
+             borderColor: allowedColor,
+             backgroundColor:gAllowed, fill:true, borderWidth:2, tension:.25,
+             pointRadius:2, pointHoverRadius:5, pointHitRadius:8, pointBorderWidth:0},
+            {label:'Blocked', data:blocked,
+             borderColor: blockedColor,
+             backgroundColor:gBlocked, fill:true, borderWidth:2, tension:.25,
+             pointRadius:2, pointHoverRadius:5, pointHitRadius:8, pointBorderWidth:0}
+          ]
+        },
+        options:{
+          resizeDelay:0, animation:false,
+          interaction:{mode:'index',intersect:false},
+          plugins:{
+            legend:{ labels:{ color:'#e6f0ff', usePointStyle:true, pointStyle:'circle' } },
+            tooltip:{
+              backgroundColor:'rgba(8,12,20,.9)',
+              titleColor:'#eaf2ff', bodyColor:'#dfeaff',
+              callbacks:{
+                title: items => items[0]?.label || '',
+                label: c => `${c.dataset.label}: ${num(c.parsed.y)}`
+              }
+            }
+          },
+          scales:{
+            x:{ ticks:{color:'#cfe0ff'}, grid:{color:'rgba(255,255,255,.06)'} },
+            y:{ ticks:{color:'#cfe0ff'}, grid:{color:'rgba(255,255,255,.06)'}, beginAtZero:true }
+          },
+          elements:{ line:{ capBezierPoints:true } }
+        }
+      });
+    }
+
+    function barChart(canvasEl, labels, label, data, color){
+      const ctx2d = canvasEl.getContext('2d');
+      return new Chart(ctx2d,{
+        type:'bar',
+        data:{ labels, datasets:[{
+          label, data,
+          backgroundColor: rgba(color, .25),
+          borderColor: color,
+          borderWidth: 1.2,
+          borderRadius: 6,
+          barPercentage:.85,
+          categoryPercentage:.8
+        }]},
+        options:{
+          indexAxis:'y',
+          animation:false,
+          plugins:{
+            legend:{ display:false },
+            tooltip:{
+              backgroundColor:'rgba(8,12,20,.9)',
+              titleColor:'#eaf2ff', bodyColor:'#dfeaff',
+              callbacks:{ label: c => `${c.label}: ${num(c.raw)}` }
+            }
+          },
+          scales:{
+            x:{ ticks:{color:'#cfe0ff'}, grid:{color:'rgba(255,255,255,.08)'}, beginAtZero:true },
+            y:{ ticks:{color:'#e6f0ff'}, grid:{color:'rgba(255,255,255,.03)'} }
+          }
+        }
+      });
+    }
+
+    // --- Data loaders
+    async function loadSummary(){
+      const r = await fetch('/api/statistics/summary'); 
+      const j = await r.json();
+
+      $('#overall_total').textContent   = num(j.overall.total);
+      $('#overall_allowed').textContent = num(j.overall.allowed);
+      $('#overall_blocked').textContent = num(j.overall.blocked);
+
+      $('#day_total').textContent       = num(j.last_24h.total);
+      $('#day_allowed').textContent     = num(j.last_24h.allowed);
+      $('#day_blocked').textContent     = num(j.last_24h.blocked);
+
+      // Top reason prettified + keep raw as tooltip
+      const rawReason = j.top_reason_24h.reason;
+      const pretty    = prettifyReason(rawReason);
+      $('#top_reason').textContent       = pretty;
+      $('#top_reason').title             = rawReason || '';
+      $('#top_reason_count').textContent = num(j.top_reason_24h.count || 0);
+    }
+
+    function ensureNonEmptySeries(labels, allowed, blocked){
+      if (labels.length) return {labels, allowed, blocked};
+      const now = Math.floor(Date.now()/1000);
+      const bucket = rangeHours<=1 ? 10 : (rangeHours<=24 ? 60 : 900);
+      const pts = 10;
+      const lbls = [];
+      for (let i=pts-1;i>=0;i--) lbls.push(fmtTime(now - i*bucket));
+      const zeros = Array(pts).fill(0);
+      return {labels: lbls, allowed: zeros, blocked: zeros};
+    }
+
+    async function loadTimeSeries(){
+      const bucket = rangeHours<=1 ? 10 : (rangeHours<=24 ? 60 : 900); // 10s, 1m, 15m
+      const r = await fetch(`/api/statistics/timeseries?hours=${rangeHours}&bucket_sec=${bucket}`);
+      const j = await r.json();
+
+      let labels  = j.points.map(p=>fmtTime(p.t));
+      let allowed = j.points.map(p=>p.allowed);
+      let blocked = j.points.map(p=>p.blocked);
+      ({labels, allowed, blocked} = ensureNonEmptySeries(labels, allowed, blocked));
+
+      if (tsChart) tsChart.destroy();
+      tsChart = lineChart($('#chart_timeseries'), labels, allowed, blocked);
+      tsChart.resize();
+    }
+
+    async function loadTops(){
+      const [ipsR, reasonsR] = await Promise.all([
+        fetch(`/api/statistics/top?what=ips&limit=10&hours=${rangeHours}`),
+        fetch(`/api/statistics/top?what=reasons&limit=8&hours=${rangeHours}`)
+      ]);
+      const ips = await ipsR.json(); 
+      const reasons = await reasonsR.json();
+
+      const ipLabels = ips.items.map(x=>x.key);
+      const ipData   = ips.items.map(x=>x.count);
+      const reasonLabels = reasons.items.map(x=>x.key);
+      const reasonData   = reasons.items.map(x=>x.count);
+
+      if (topIpsChart) topIpsChart.destroy();
+      if (topReasonsChart) topReasonsChart.destroy();
+
+      topIpsChart = barChart($('#chart_top_ips'), ipLabels, 'Blocked', ipData, cssVar('--c-blocked', '#ff6b81'));
+      topReasonsChart = barChart($('#chart_top_reasons'), reasonLabels, 'Count', reasonData, cssVar('--c-allowed', '#5bbcff'));
+
+      topIpsChart.resize(); 
+      topReasonsChart.resize();
+    }
+
+    function updateSinceLabel(){
+      const map = {1:'Last 1 hour',24:'Last 24 hours',168:'Last 7 days'};
+      $('#sinceLabel').textContent = map[rangeHours] || `Last ${rangeHours}h`;
+    }
+
+    async function refreshAll(){
+      updateSinceLabel();
+      await Promise.all([loadSummary(), loadTimeSeries(), loadTops()]);
+    }
+
+    // Range buttons
+    $$('.btn-group [data-range]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        $$('.btn-group [data-range]').forEach(b=>b.classList.remove('active'));
+        btn.classList.add('active');
+        rangeHours = parseInt(btn.getAttribute('data-range'),10);
+        requestAnimationFrame(()=>refreshAll());
+      });
+    });
+
+    // Resize hygiene
+    window.addEventListener('resize', ()=>{
+      tsChart && tsChart.resize();
+      topIpsChart && topIpsChart.resize();
+      topReasonsChart && topReasonsChart.resize();
+    });
+
+    // Init + periodic refresh
+    refreshAll();
+    setInterval(refreshAll, 30000);
+  </script>
+</body>
+</html>
