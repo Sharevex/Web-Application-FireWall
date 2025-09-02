@@ -1,146 +1,141 @@
-#!/usr/bin/env python3
-"""
-secureauth.py
-- Env-based MySQL config
-- bcrypt password hashing (salted)
-- Minimal, safe logging
-- Auto-create `users` table if missing
-- CLI: create/update a user password
+# secureauth.py — MySQL edition
+# Uses the shared MySQL pool + auto-schema from mysql_db.py
 
-Env:
-  MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB
-  BCRYPT_ROUNDS (default 12)
-"""
-
-import os
-import logging
+import hashlib
+import base64
 import traceback
-import mysql.connector
-from mysql.connector import pooling
-import bcrypt
+import re
+from datetime import datetime
 
-# ---------- Logging ----------
-logger = logging.getLogger("secureauth")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    ch = logging.StreamHandler()
-    ch.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
-    logger.addHandler(ch)
+from mysql_db import init_mysql, get_conn, upsert_user  # ensures DB + tables
 
-# ---------- Config ----------
-MYSQL_CFG = {
-    "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
-    "port": int(os.getenv("MYSQL_PORT", "3306")),
-    "user": os.getenv("MYSQL_USER", "admin"),
-    "password": os.getenv("MYSQL_PASSWORD", "changeme"),
-    "database": os.getenv("MYSQL_DB", "admin"),
-    "autocommit": True,
-}
-POOL_SIZE = int(os.getenv("MYSQL_POOL_SIZE", "5"))
-BCRYPT_ROUNDS = int(os.getenv("BCRYPT_ROUNDS", "12"))
+# Initialize MySQL pool and ensure schema (users table, etc.)
+init_mysql()
 
-_pool = None
-
-
-def _pool_conn():
-    global _pool
-    if _pool is None:
-        _pool = pooling.MySQLConnectionPool(pool_name="secureauth_pool", pool_size=POOL_SIZE, **MYSQL_CFG)
-        _ensure_schema()
-    return _pool.get_connection()
-
-
-def _ensure_schema():
-    sql = """
-    CREATE TABLE IF NOT EXISTS users (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        username VARCHAR(64) NOT NULL UNIQUE,
-        password_hash VARCHAR(128) NOT NULL,
-        is_active TINYINT(1) NOT NULL DEFAULT 1,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """
-    cn = _pool.get_connection()
-    try:
-        with cn.cursor() as cur:
-            cur.execute(sql)
-        cn.commit()
-    finally:
-        cn.close()
-
-
+# ---------- Helpers ----------
 def hash_password(password: str) -> str:
-    """bcrypt salted hash -> str"""
-    pw = password.encode("utf-8")
-    salt = bcrypt.gensalt(rounds=BCRYPT_ROUNDS)
-    return bcrypt.hashpw(pw, salt).decode("utf-8")
+    """SHA-256 (binary) → base64, same format as your previous implementation."""
+    digest = hashlib.sha256(password.encode("utf-8")).digest()
+    return base64.b64encode(digest).decode("utf-8")
 
+def _valid_username(u: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", u or ""))
 
+# ---------- Core API ----------
 def get_user(username: str):
-    """Return (username, password_hash, is_active) or None"""
+    """Return tuple (username, password_hash, is_active, created_at) or None."""
     try:
-        cn = _pool_conn()
-        with cn.cursor() as cur:
-            cur.execute("SELECT username, password_hash, is_active FROM users WHERE username=%s", (username,))
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT username, password_hash, is_active, created_at FROM users WHERE username=%s",
+                (username,),
+            )
             row = cur.fetchone()
-        cn.close()
-        return row
+            return row if row else None
     except Exception:
-        logger.error("DB error in get_user\n%s", traceback.format_exc())
+        print("DB error in get_user:\n", traceback.format_exc())
         return None
 
-
 def verify_user(username: str, password: str) -> bool:
-    row = get_user(username)
-    if not row:
-        return False
-    _, pw_hash, is_active = row
-    if not is_active:
-        return False
+    """Check username/password; requires is_active=1."""
     try:
-        ok = bcrypt.checkpw(password.encode("utf-8"), pw_hash.encode("utf-8"))
-        return bool(ok)
+        user = get_user(username)
+        if not user:
+            return False
+        stored_hash = user[1]
+        is_active   = int(user[2]) == 1
+        if not is_active:
+            return False
+        return hash_password(password) == stored_hash
     except Exception:
-        logger.error("bcrypt verify error\n%s", traceback.format_exc())
+        print("verify_user error:\n", traceback.format_exc())
         return False
 
-
-def create_or_update_user(username: str, password: str, active: bool = True) -> None:
-    """Create or update user with new password hash."""
-    pw_hash = hash_password(password)
-    cn = _pool_conn()
+def user_exists(username: str) -> bool:
     try:
-        with cn.cursor() as cur:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM users WHERE username=%s", (username,))
+            return cur.fetchone() is not None
+    except Exception:
+        print("DB error in user_exists:\n", traceback.format_exc())
+        return False
+
+def create_admin(username: str, password: str) -> bool:
+    """
+    Creates or updates an admin user (is_admin=1). Activates the user.
+    Returns True on success.
+    """
+    try:
+        if not _valid_username(username) or not password:
+            return False
+        pwd = hash_password(password)
+        # Use upsert helper (unique on username) — sets/updates hash + flags
+        upsert_user(username, pwd, is_admin=1, is_active=1)
+        return True
+    except Exception:
+        print("DB error in create_admin:\n", traceback.format_exc())
+        return False
+
+def delete_admin(username: str) -> bool:
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM users WHERE username=%s", (username,))
+            return getattr(cur, "rowcount", 0) > 0
+    except Exception:
+        print("DB error in delete_admin:\n", traceback.format_exc())
+        return False
+
+def list_admins():
+    """
+    Returns list of dicts: [{"username": "...", "created_at": "..."}, ...]
+    If your table has is_admin, we filter by it; otherwise returns any users present.
+    """
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            # If column is present (it is, in mysql_db.py), filter admins only.
+            try:
+                cur.execute("SELECT username, created_at FROM users WHERE is_admin=1 ORDER BY created_at ASC")
+            except Exception:
+                cur.execute("SELECT username, created_at FROM users ORDER BY created_at ASC")
+            rows = cur.fetchall() or []
+        out = []
+        for username, created_at in rows:
+            try:
+                created_iso = created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at)
+            except Exception:
+                created_iso = str(created_at)
+            out.append({"username": username, "created_at": created_iso})
+        return out
+    except Exception:
+        print("DB error in list_admins:\n", traceback.format_exc())
+        return []
+
+# ---------- Password helpers for route compatibility ----------
+def set_password(username: str, new_password: str) -> bool:
+    """Set password for an existing user; keeps is_admin/is_active unchanged."""
+    try:
+        if not _valid_username(username) or not new_password:
+            return False
+        with get_conn() as conn:
+            cur = conn.cursor()
             cur.execute(
-                """
-                INSERT INTO users (username, password_hash, is_active)
-                VALUES (%s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                   password_hash=VALUES(password_hash),
-                   is_active=VALUES(is_active)
-                """,
-                (username, pw_hash, 1 if active else 0),
+                "UPDATE users SET password_hash=%s WHERE username=%s",
+                (hash_password(new_password), username),
             )
-        cn.commit()
-        logger.info("✅ user upserted: %s (active=%s)", username, active)
-    finally:
-        cn.close()
+            if getattr(cur, "rowcount", 0) == 0:
+                # if user doesn't exist, create as active admin by convention
+                upsert_user(username, hash_password(new_password), is_admin=1, is_active=1)
+        return True
+    except Exception:
+        print("DB error in set_password:\n", traceback.format_exc())
+        return False
 
+def reset_password(username: str, new_password: str) -> bool:
+    return set_password(username, new_password)
 
-if __name__ == "__main__":
-    import argparse
-    p = argparse.ArgumentParser(description="Manage WAF users")
-    p.add_argument("--set-user", metavar="USERNAME")
-    p.add_argument("--password", metavar="PASSWORD")
-    p.add_argument("--activate", action="store_true")
-    p.add_argument("--deactivate", action="store_true")
-    args = p.parse_args()
-
-    if args.set_user and args.password:
-        create_or_update_user(
-            args.set_user,
-            args.password,
-            active=not args.deactivate if (args.activate or args.deactivate) else True,
-        )
-    else:
-        logger.info("Usage: python secureauth.py --set-user admin --password 'StrongPass123' --activate")
+def update_admin_password(username: str, new_password: str) -> bool:
+    return set_password(username, new_password)
