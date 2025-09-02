@@ -2,46 +2,49 @@
 # -*- coding: utf-8 -*-
 
 """
-Firewall (MySQL edition)
-------------------------
+Firewall (final)
+----------------
 - Network IPS/IDS (Scapy heuristic)
 - App-layer WAF: DDoS limiter, rule + AI checks
 - Live JSON endpoints + settings/dashboard/statistics pages
-- MySQL-backed blocklist (with OS enforcement) and MySQL-backed stats/traffic
+- MySQL-backed blocklist with OS sync (via MSSQLIPBlocker)
 - Self-DDoS protections: safe allowances BEFORE limiter, softer throttle, higher limits for admins
+- SQLite-backed request/event history for Statistics page
 - Traffic Tap: logs *every* request (allowed + blocked), per-IP totals, /api/traffic/usage
 
-Env (examples):
-  MYSQL_HOST=127.0.0.1
-  MYSQL_PORT=3306
-  MYSQL_USER=waf
-  MYSQL_PASSWORD=yourpass
-  MYSQL_DB=wafdb
-  MYSQL_POOL_SIZE=8
-
+Env toggles (all optional):
   FW_BLOCK_TTL=300
   FW_DDOS_BLOCK_TTL=300
   FW_NET_BLOCK_TTL=600
   FW_DDOS_WINDOW=60
-  FW_DDOS_MAX=20
-  FW_DDOS_AUTH_MAX=120
-  FW_DDOS_HARD_BLOCK_FACTOR=0
+  FW_DDOS_MAX=20                  # baseline limit for unauthenticated
+  FW_DDOS_AUTH_MAX=120            # higher per-minute limit for logged-in admins
+  FW_DDOS_HARD_BLOCK_FACTOR=0     # 0=disabled; if >0, hard-block when traffic >= factor*limit
   FW_TRUST_PROXY=1
   FW_BLOCK_CACHE_SECS=10
   FW_LISTEN_HOST=0.0.0.0
   FW_LISTEN_PORT=8080
-  FW_TICK_SECS=10
+  FW_TICK_SECS=10                 # background ticker interval
   SAFE_GET_PATHS=metrics,stats,top_ips,top_blocked
-  ADMIN_IPS=
+  ADMIN_IPS=                      # comma-separated IPs or CIDRs (e.g., 203.0.113.10,10.0.0.0/8)
+  FIREWALL_STATS_DB=firewall_stats.db
 """
 
-import os, re, time, threading, logging
+import os
+import sys
+import re
+import time
+import threading
+import logging
+import sqlite3
 from collections import defaultdict, deque
 from typing import Dict, Deque, Tuple, List
 from datetime import datetime, timezone
 
 import psutil
-from flask import Flask, render_template, request, jsonify, session, flash, redirect, url_for, abort
+from flask import (
+    Flask, render_template, request, jsonify, session, flash, redirect, url_for, abort, g
+)
 
 # Optional Scapy
 try:
@@ -53,14 +56,8 @@ except Exception:
 # External modules
 import secureauth
 from ai_detector import detect_attack
+from ip_blocker_db import MSSQLIPBlocker
 from os_detection import detect_os
-
-# NEW: MySQL modules
-from mysql_db import (
-    init_mysql, get_conn,
-    insert_event, log_traffic_and_totals, get_traffic_usage, insert_request
-)
-from ip_blocker_db import MySQLIPBlocker
 
 # ----------------------------- Config -----------------------------
 FW_BLOCK_TTL              = int(os.getenv("FW_BLOCK_TTL", "300"))
@@ -69,15 +66,18 @@ FW_NET_BLOCK_TTL          = int(os.getenv("FW_NET_BLOCK_TTL", "600"))
 FW_DDOS_WINDOW            = int(os.getenv("FW_DDOS_WINDOW", "60"))
 FW_DDOS_MAX               = int(os.getenv("FW_DDOS_MAX", "20"))
 FW_DDOS_AUTH_MAX          = int(os.getenv("FW_DDOS_AUTH_MAX", "120"))
-FW_DDOS_HARD_BLOCK_FACTOR = int(os.getenv("FW_DDOS_HARD_BLOCK_FACTOR", "0"))
+FW_DDOS_HARD_BLOCK_FACTOR = int(os.getenv("FW_DDOS_HARD_BLOCK_FACTOR", "0"))  # 0 disables hard block
 FW_TRUST_PROXY            = os.getenv("FW_TRUST_PROXY", "1") == "1"
 FW_BLOCK_CACHE_SECS       = int(os.getenv("FW_BLOCK_CACHE_SECS", "10"))
 FW_LISTEN_HOST            = os.getenv("FW_LISTEN_HOST", "0.0.0.0")
 FW_LISTEN_PORT            = int(os.getenv("FW_LISTEN_PORT", "8080"))
 FW_TICK_SECS              = int(os.getenv("FW_TICK_SECS", "10"))
 
-SAFE_GET_PATHS = set([p.strip() for p in os.getenv("SAFE_GET_PATHS", "metrics,stats,top_ips,top_blocked").split(",") if p.strip()])
-ADMIN_IPS_RAW  = os.getenv("ADMIN_IPS", "").strip()
+SAFE_GET_PATHS            = set([p.strip() for p in os.getenv("SAFE_GET_PATHS", "metrics,stats,top_ips,top_blocked").split(",") if p.strip()])
+ADMIN_IPS_RAW             = os.getenv("ADMIN_IPS", "").strip()
+
+# SQLite stats DB path
+DB_PATH                   = os.environ.get("FIREWALL_STATS_DB", "firewall_stats.db")
 
 # ----------------------------- Logging -----------------------------
 logging.basicConfig(
@@ -89,9 +89,18 @@ logger = logging.getLogger("firewall")
 
 # ----------------------------- IP/CIDR utils -----------------------------
 def _parse_admin_ips(raw: str):
-    return [t.strip() for t in raw.split(",") if t.strip()] if raw else []
+    items = []
+    if not raw:
+        return items
+    for token in raw.split(","):
+        t = token.strip()
+        if not t:
+            continue
+        items.append(t)
+    return items
 
 def _ip_in_cidr(ip: str, cidr: str) -> bool:
+    # very small helper to avoid extra deps; supports /8.. /32 ipv4
     try:
         if "/" not in cidr:
             return ip == cidr
@@ -111,9 +120,7 @@ ip_request_count: Dict[str, int] = defaultdict(int)
 blocked_ips: set = set()
 blocked_event_count: Dict[str, int] = defaultdict(int)
 
-# MySQL setup + blocker
-init_mysql()
-db_blocker = MySQLIPBlocker(default_ttl_seconds=FW_BLOCK_TTL, sync_interval_sec=30)
+db_blocker = MSSQLIPBlocker(default_ttl_seconds=FW_BLOCK_TTL, sync_interval_sec=30)
 
 # Flask app
 app = Flask(__name__)
@@ -123,6 +130,7 @@ app.secret_key = os.getenv("FW_SECRET_KEY", "change-this-in-prod")
 if FW_TRUST_PROXY:
     try:
         from werkzeug.middleware.proxy_fix import ProxyFix
+        # if you have CF->nginx->app, you may want x_for=2
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_host=1)
         logger.info("ProxyFix enabled.")
     except Exception as e:
@@ -130,9 +138,11 @@ if FW_TRUST_PROXY:
 
 def get_client_ip() -> str:
     cf_ip = request.headers.get("CF-Connecting-IP")
-    if cf_ip: return cf_ip
+    if cf_ip:
+        return cf_ip
     xff = request.headers.get("X-Forwarded-For", "")
-    if xff: return xff.split(",")[0].strip()
+    if xff:
+        return xff.split(",")[0].strip()
     return request.remote_addr or "unknown"
 
 # ---------------------- Block cache refresher ----------------------
@@ -152,6 +162,263 @@ def refresh_block_cache(force: bool = False) -> None:
 
 db_blocker.start_background_sync()
 refresh_block_cache(force=True)
+
+# ------------------------------ Stats DB ---------------------------
+def init_stats_db():
+    db = sqlite3.connect(DB_PATH)
+    cur = db.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,              -- unix seconds
+            ip TEXT,
+            action TEXT CHECK (action IN ('allowed','blocked')) NOT NULL,
+            reason TEXT,
+            bytes_in INTEGER DEFAULT 0,
+            bytes_out INTEGER DEFAULT 0,
+            user_agent TEXT
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_events_action ON events(action)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_events_reason ON events(reason)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_events_ip ON events(ip)")
+    db.commit()
+    db.close()
+
+def get_db():
+    if "db" not in g:
+        g.db = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+# ------------------------------ Traffic Tap ------------------------------
+def _ensure_traffic_tables(conn: sqlite3.Connection) -> None:
+    """
+    Idempotent: creates tables/indexes if they don't exist.
+    Uses the same DB_PATH as the stats/events.
+    """
+    cur = conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL;")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS traffic_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts         INTEGER NOT NULL,           -- unix seconds
+            ip         TEXT,
+            method     TEXT,
+            path       TEXT,
+            status     INTEGER,
+            action     TEXT,                       -- 'allowed'|'blocked'|'throttled' etc.
+            bytes_in   INTEGER DEFAULT 0,
+            bytes_out  INTEGER DEFAULT 0,
+            user_agent TEXT
+        )
+    """)
+    cur.execute("""CREATE INDEX IF NOT EXISTS idx_traffic_ts ON traffic_log(ts);""")
+    cur.execute("""CREATE INDEX IF NOT EXISTS idx_traffic_ip ON traffic_log(ip);""")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ip_totals (
+            ip         TEXT PRIMARY KEY,
+            hits       INTEGER NOT NULL DEFAULT 0,
+            total_in   INTEGER NOT NULL DEFAULT 0,
+            total_out  INTEGER NOT NULL DEFAULT 0,
+            first_seen INTEGER,
+            last_seen  INTEGER
+        )
+    """)
+    conn.commit()
+
+def record_traffic(ip: str, method: str, path: str, status: int, action: str,
+                   bytes_in: int, bytes_out: int, user_agent: str = "") -> None:
+    """
+    Logs every request and updates per-IP totals.
+    """
+    ts = int(time.time())
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        _ensure_traffic_tables(conn)
+        cur = conn.cursor()
+
+        cur.execute(
+            "INSERT INTO traffic_log(ts, ip, method, path, status, action, bytes_in, bytes_out, user_agent) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (ts, ip, method, path, int(status), action, int(bytes_in or 0), int(bytes_out or 0), user_agent or "")
+        )
+
+        cur.execute("""
+            INSERT INTO ip_totals(ip, hits, total_in, total_out, first_seen, last_seen)
+            VALUES(?, 1, ?, ?, ?, ?)
+            ON CONFLICT(ip) DO UPDATE SET
+              hits      = hits + 1,
+              total_in  = total_in  + excluded.total_in,
+              total_out = total_out + excluded.total_out,
+              last_seen = excluded.last_seen
+        """, (ip, int(bytes_in or 0), int(bytes_out or 0), ts, ts))
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"record_traffic failed: {e}")
+
+def get_traffic_usage(hours: int | None = None, top: int = 10) -> dict:
+    """
+    Returns global totals + top talkers.
+    If `hours` is provided, totals are computed from traffic_log window.
+    Otherwise uses the fast ip_totals table.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    _ensure_traffic_tables(conn)
+    cur = conn.cursor()
+
+    if hours and hours > 0:
+        since = int(time.time()) - hours * 3600
+        row = cur.execute("""
+            SELECT COALESCE(SUM(bytes_in),0) AS tin,
+                   COALESCE(SUM(bytes_out),0) AS tout,
+                   COUNT(*) AS hits
+            FROM traffic_log WHERE ts >= ?
+        """, (since,)).fetchone()
+        top_rows = cur.execute("""
+            SELECT ip,
+                   COALESCE(SUM(bytes_in),0)  AS tin,
+                   COALESCE(SUM(bytes_out),0) AS tout,
+                   COUNT(*) AS hits
+            FROM traffic_log
+            WHERE ts >= ?
+            GROUP BY ip
+            ORDER BY (tin+tout) DESC
+            LIMIT ?
+        """, (since, top)).fetchall()
+    else:
+        row = cur.execute("""
+            SELECT COALESCE(SUM(total_in),0)  AS tin,
+                   COALESCE(SUM(total_out),0) AS tout,
+                   COALESCE(SUM(hits),0)      AS hits
+            FROM ip_totals
+        """).fetchone()
+        top_rows = cur.execute("""
+            SELECT ip, total_in AS tin, total_out AS tout, hits
+            FROM ip_totals
+            ORDER BY (total_in+total_out) DESC
+            LIMIT ?
+        """, (top,)).fetchall()
+
+    out = {
+        "bytes_in": int(row["tin"] or 0),
+        "bytes_out": int(row["tout"] or 0),
+        "bytes_total": int((row["tin"] or 0) + (row["tout"] or 0)),
+        "hits": int(row["hits"] or 0),
+        "top": [{"ip": r["ip"], "bytes_in": int(r["tin"] or 0), "bytes_out": int(r["tout"] or 0),
+                 "bytes_total": int((r["tin"] or 0) + (r["tout"] or 0)), "hits": int(r["hits"] or 0)} for r in top_rows]
+    }
+    conn.close()
+    return out
+
+@app.after_request
+def traffic_tap(response):
+    """Transparent tap: runs for *every* request."""
+    try:
+        ip      = get_client_ip()
+        method  = request.method
+        path    = request.path
+        status  = response.status_code
+        ua      = request.headers.get("User-Agent", "")
+
+        # inbound bytes
+        bytes_in = request.content_length or 0
+        if not bytes_in:
+            try:
+                raw = request.get_data(cache=False, as_text=False)
+                bytes_in = len(raw or b"")
+            except Exception:
+                bytes_in = 0
+
+        # outbound bytes
+        bytes_out = response.calculate_content_length()
+        if bytes_out is None:
+            try:
+                bytes_out = len(response.get_data())
+            except Exception:
+                bytes_out = 0
+
+        action = 'blocked' if status in (403, 429) else 'allowed'
+        record_traffic(ip, method, path, status, action, bytes_in, bytes_out, ua)
+    except Exception as e:
+        logger.debug(f"traffic_tap error: {e}")
+    return response
+
+@app.get("/api/traffic/usage")
+def api_traffic_usage():
+    hours = request.args.get("hours")
+    try:
+        hours_i = int(hours) if hours is not None else None
+    except Exception:
+        hours_i = None
+    return jsonify(get_traffic_usage(hours_i))
+
+@app.teardown_appcontext
+def close_db(exception=None):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+def _insert_event(conn, ts: int, action: str, ip: str, reason: str,
+                  bytes_in: int, bytes_out: int, user_agent: str):
+    conn.execute(
+        "INSERT INTO events(ts, ip, action, reason, bytes_in, bytes_out, user_agent) VALUES(?,?,?,?,?,?,?)",
+        (ts, ip, action, reason, int(bytes_in or 0), int(bytes_out or 0), user_agent)
+    )
+    conn.commit()
+
+def log_event(action: str, ip: str, reason: str = None,
+              bytes_in: int = 0, bytes_out: int = 0, user_agent: str = None):
+    """Works in request context (uses Flask g)."""
+    ts = int(time.time())
+    try:
+        try:
+            conn = get_db()
+            _insert_event(conn, ts, action, ip, reason, bytes_in, bytes_out, user_agent)
+        except RuntimeError:
+            # outside request context
+            conn = sqlite3.connect(DB_PATH)
+            _insert_event(conn, ts, action, ip, reason, bytes_in, bytes_out, user_agent)
+            conn.close()
+    except Exception as e:
+        logger.debug(f"log_event failed: {e}")
+
+def log_event_bg(action: str, ip: str, reason: str = None,
+                 bytes_in: int = 0, bytes_out: int = 0, user_agent: str = None):
+    """Background-thread safe logger (no Flask g)."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        _insert_event(conn, int(time.time()), action, ip, reason, bytes_in, bytes_out, user_agent)
+        conn.close()
+    except Exception as e:
+        logger.debug(f"log_event_bg failed: {e}")
+
+# --------------------------- DDoS limiter --------------------------
+class DDoSRateLimiter:
+    def __init__(self, time_window: int = 60, max_requests: int = 20):
+        self.time_window = time_window
+        self.max_requests = max_requests
+        self.requests_log: Dict[str, Deque[float]] = defaultdict(deque)
+
+    def is_ddos(self, ip: str, max_requests: int = None) -> Tuple[bool, int]:
+        """Returns (is_ddos, current_count)."""
+        threshold = max_requests if max_requests is not None else self.max_requests
+        now = time.time()
+        dq = self.requests_log[ip]
+        limit = now - self.time_window
+        while dq and dq[0] < limit:
+            dq.popleft()
+        count = len(dq)
+        if count >= threshold:
+            return True, count
+        dq.append(now)
+        return False, count + 1
+
+ddos_limiter = DDoSRateLimiter(time_window=FW_DDOS_WINDOW, max_requests=FW_DDOS_MAX)
 
 # ------------------------------ Stats (in-memory quick) ------------------------------
 class FirewallStats:
@@ -222,7 +489,7 @@ def process_packet(packet):
         if ml_predict_packet(packet):
             _apply_block(src_ip, "Network-level malicious packet", FW_NET_BLOCK_TTL)
             stats.network_blocks += 1
-            _log_event_bg('blocked', src_ip, 'network_packet')
+            log_event_bg('blocked', src_ip, reason='network_packet')
     except Exception as e:
         logger.debug(f"process_packet error: {e}")
 
@@ -264,87 +531,6 @@ def get_disk_usage():
         }]
     except Exception:
         return []
-
-# ------------------------------ Traffic Tap ------------------------------
-def record_traffic(ip: str, method: str, path: str, status: int, action: str,
-                   bytes_in: int, bytes_out: int, user_agent: str = "") -> None:
-    ts = int(time.time())
-    try:
-        log_traffic_and_totals(ts, ip, method, path, int(status), action, int(bytes_in or 0), int(bytes_out or 0), user_agent or "")
-    except Exception as e:
-        logger.debug(f"record_traffic failed: {e}")
-
-@app.after_request
-def traffic_tap(response):
-    try:
-        ip      = get_client_ip()
-        method  = request.method
-        path    = request.path
-        status  = response.status_code
-        ua      = request.headers.get("User-Agent", "")
-        bytes_in = request.content_length or 0
-        if not bytes_in:
-            try:
-                raw = request.get_data(cache=False, as_text=False)
-                bytes_in = len(raw or b"")
-            except Exception:
-                bytes_in = 0
-        bytes_out = response.calculate_content_length()
-        if bytes_out is None:
-            try:
-                bytes_out = len(response.get_data())
-            except Exception:
-                bytes_out = 0
-        action = 'blocked' if status in (403, 429) else 'allowed'
-        record_traffic(ip, method, path, status, action, bytes_in, bytes_out, ua)
-        try:
-            insert_request(ip, method, path, status, int(action == 'blocked'), None)
-        except Exception:
-            pass
-    except Exception as e:
-        logger.debug(f"traffic_tap error: {e}")
-    return response
-
-# ------------------------------ Helpers ------------------------------
-def _insert_event_mysql(ts: int, action: str, ip: str, reason: str,
-                        bytes_in: int, bytes_out: int, user_agent: str):
-    insert_event(ts, ip, action, reason, bytes_in, bytes_out, user_agent)
-
-def log_event(action: str, ip: str, reason: str = None,
-              bytes_in: int = 0, bytes_out: int = 0, user_agent: str = None):
-    try:
-        _insert_event_mysql(int(time.time()), action, ip, reason or "", int(bytes_in or 0), int(bytes_out or 0), user_agent or "")
-    except Exception as e:
-        logger.debug(f"log_event failed: {e}")
-
-def _log_event_bg(action: str, ip: str, reason: str = None,
-                  bytes_in: int = 0, bytes_out: int = 0, user_agent: str = None):
-    try:
-        _insert_event_mysql(int(time.time()), action, ip, reason or "", int(bytes_in or 0), int(bytes_out or 0), user_agent or "")
-    except Exception as e:
-        logger.debug(f"log_event_bg failed: {e}")
-
-# --------------------------- DDoS limiter --------------------------
-class DDoSRateLimiter:
-    def __init__(self, time_window: int = 60, max_requests: int = 20):
-        self.time_window = time_window
-        self.max_requests = max_requests
-        self.requests_log: Dict[str, Deque[float]] = defaultdict(deque)
-
-    def is_ddos(self, ip: str, max_requests: int = None) -> Tuple[bool, int]:
-        threshold = max_requests if max_requests is not None else self.max_requests
-        now = time.time()
-        dq = self.requests_log[ip]
-        limit = now - self.time_window
-        while dq and dq[0] < limit:
-            dq.popleft()
-        count = len(dq)
-        if count >= threshold:
-            return True, count
-        dq.append(now)
-        return False, count + 1
-
-ddos_limiter = DDoSRateLimiter(time_window=FW_DDOS_WINDOW, max_requests=FW_DDOS_MAX)
 
 # ------------------------------ Routes -----------------------------
 @app.before_request
@@ -419,7 +605,11 @@ def api_update_block(ip):
     data = request.get_json(force=True, silent=True) or {}
     new_reason = (data.get("reason") or "").strip()
     try:
-        db_blocker.update_reason(ip, new_reason)
+        if hasattr(db_blocker, "update_reason"):
+            db_blocker.update_reason(ip, new_reason)
+        else:
+            db_blocker.unblock_ip(ip)
+            db_blocker.block_ip(ip, new_reason, ttl_seconds=300)
         refresh_block_cache(force=True)
         return jsonify({"status": "ok"})
     except Exception as e:
@@ -473,6 +663,7 @@ def api_del_admin(username):
         logging.error(f"delete_admin failed: {e}")
         return jsonify({"error": "delete_admin failed"}), 500
 
+# NEW: Reset admin password
 @app.route("/api/admins/<username>/password", methods=["PUT"])
 def api_admin_reset_password(username):
     if "user" not in session:
@@ -483,25 +674,36 @@ def api_admin_reset_password(username):
         return jsonify({"error": "password too short"}), 400
 
     try:
+        # Prefer explicit setters if available
         if hasattr(secureauth, "set_password"):
             ok = secureauth.set_password(username, password)
+            if not ok:
+                return jsonify({"error": "set_password failed"}), 500
         elif hasattr(secureauth, "reset_password"):
             ok = secureauth.reset_password(username, password)
+            if not ok:
+                return jsonify({"error": "reset_password failed"}), 500
         elif hasattr(secureauth, "update_admin_password"):
             ok = secureauth.update_admin_password(username, password)
+            if not ok:
+                return jsonify({"error": "update_admin_password failed"}), 500
         else:
-            try: secureauth.delete_admin(username)
-            except Exception: pass
+            # Fallback: recreate user
+            try:
+                secureauth.delete_admin(username)
+            except Exception:
+                pass
             ok = secureauth.create_admin(username, password)
-        if not ok:
-            return jsonify({"error": "password update failed"}), 500
+            if not ok:
+                return jsonify({"error": "recreate admin failed"}), 500
+
         logger.info(f"Admin password updated for {username}")
         return jsonify({"status": "ok"})
     except Exception as e:
         logging.error(f"reset password failed for {username}: {e}")
         return jsonify({"error": "reset failed"}), 500
 
-# ---------- Quick stats JSON ----------
+# ---------- Quick stats JSON (existing) ----------
 @app.route("/stats")
 def stats_endpoint():
     return jsonify(stats.to_dict())
@@ -565,35 +767,30 @@ def statistics_page():
         return redirect(url_for("login"))
     return render_template("statistics.html", page_title="Statistics")
 
-# ---------- Statistics APIs (MySQL) ----------
+# ---------- Statistics APIs ----------
 @app.get("/api/statistics/summary")
 def api_statistics_summary():
+    db = get_db()
     now = int(time.time())
     since_24h = now - 24*3600
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM events")
-        total = int(cur.fetchone()[0])
-        cur.execute("SELECT COUNT(*) FROM events WHERE action='allowed'")
-        allowed = int(cur.fetchone()[0])
-        blocked = total - allowed
 
-        cur.execute("SELECT COUNT(*) FROM events WHERE ts >= %s", (since_24h,))
-        total_24 = int(cur.fetchone()[0])
-        cur.execute("SELECT COUNT(*) FROM events WHERE ts >= %s AND action='allowed'", (since_24h,))
-        allowed_24 = int(cur.fetchone()[0])
-        blocked_24 = total_24 - allowed_24
+    total = db.execute("SELECT COUNT(*) AS c FROM events").fetchone()["c"]
+    allowed = db.execute("SELECT COUNT(*) AS c FROM events WHERE action='allowed'").fetchone()["c"]
+    blocked = total - allowed
 
-        cur.execute("""
-            SELECT COALESCE(reason,'(none)') AS reason, COUNT(*) AS c
-            FROM events
-            WHERE ts >= %s AND action='blocked'
-            GROUP BY reason
-            ORDER BY c DESC
-            LIMIT 1
-        """, (since_24h,))
-        row = cur.fetchone()
-        top_reason_24 = (row[0], int(row[1])) if row else (None, 0)
+    total_24 = db.execute("SELECT COUNT(*) AS c FROM events WHERE ts>=?", (since_24h,)).fetchone()["c"]
+    allowed_24 = db.execute("SELECT COUNT(*) AS c FROM events WHERE ts>=? AND action='allowed'", (since_24h,)).fetchone()["c"]
+    blocked_24 = total_24 - allowed_24
+
+    row = db.execute("""
+        SELECT COALESCE(reason,'(none)') AS reason, COUNT(*) AS c
+        FROM events
+        WHERE ts>=? AND action='blocked'
+        GROUP BY reason
+        ORDER BY c DESC
+        LIMIT 1
+    """, (since_24h,)).fetchone()
+    top_reason_24 = (row["reason"], row["c"]) if row else (None, 0)
 
     return jsonify({
         "overall": {"total": total, "allowed": allowed, "blocked": blocked},
@@ -605,35 +802,34 @@ def api_statistics_summary():
 def api_statistics_timeseries():
     try:
         hours = max(1, int(request.args.get("hours", 24)))
-        bucket = max(10, min(int(request.args.get("bucket_sec", 60)), 3600))
+        bucket = max(10, min(int(request.args.get("bucket_sec", 60)), 3600))  # 10s..1h
     except Exception:
         hours, bucket = 24, 60
+
     now = int(time.time())
     since = now - hours*3600
 
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute(f"""
-            SELECT FLOOR(ts / %s) * %s AS t,
-                   COUNT(*) AS total,
-                   SUM(CASE WHEN action='allowed' THEN 1 ELSE 0 END) AS allowed,
-                   SUM(CASE WHEN action='blocked' THEN 1 ELSE 0 END) AS blocked,
-                   SUM(bytes_in)  AS bytes_in,
-                   SUM(bytes_out) AS bytes_out
-            FROM events
-            WHERE ts >= %s
-            GROUP BY FLOOR(ts / %s)
-            ORDER BY t ASC
-        """, (bucket, bucket, since, bucket))
-        rows = cur.fetchall() or []
+    db = get_db()
+    rows = db.execute("""
+        SELECT CAST(ts / ? AS INTEGER) * ? AS t,
+               COUNT(*) AS total,
+               SUM(CASE WHEN action='allowed' THEN 1 ELSE 0 END) AS allowed,
+               SUM(CASE WHEN action='blocked' THEN 1 ELSE 0 END) AS blocked,
+               SUM(bytes_in)  AS bytes_in,
+               SUM(bytes_out) AS bytes_out
+        FROM events
+        WHERE ts >= ?
+        GROUP BY CAST(ts / ? AS INTEGER)
+        ORDER BY t ASC
+    """, (bucket, bucket, since, bucket)).fetchall()
 
     data = [{
-        "t": int(r[0]),
-        "total": int(r[1] or 0),
-        "allowed": int(r[2] or 0),
-        "blocked": int(r[3] or 0),
-        "bytes_in": int(r[4] or 0),
-        "bytes_out": int(r[5] or 0),
+        "t": int(r["t"]),
+        "total": int(r["total"]),
+        "allowed": int(r["allowed"] or 0),
+        "blocked": int(r["blocked"] or 0),
+        "bytes_in": int(r["bytes_in"] or 0),
+        "bytes_out": int(r["bytes_out"] or 0)
     } for r in rows]
 
     return jsonify({"since": since, "now": now, "bucket_sec": bucket, "points": data})
@@ -646,30 +842,40 @@ def api_statistics_top():
     except Exception:
         limit = 10
     hours = request.args.get("hours")
+
     since_clause = ""
-    params: List = []
+    params = []
     if hours:
         try:
             hours_int = max(1, int(hours))
             since = int(time.time()) - hours_int*3600
-            since_clause = " AND ts>=%s "
+            since_clause = " AND ts>=? "
             params.append(since)
         except Exception:
             pass
 
-    with get_conn() as conn:
-        cur = conn.cursor()
-        if what == "reasons":
-            q = (f"SELECT COALESCE(reason,'(none)') AS k, COUNT(*) AS c "
-                 f"FROM events WHERE action='blocked' {since_clause} GROUP BY reason ORDER BY c DESC LIMIT %s")
-        else:
-            q = (f"SELECT COALESCE(ip,'(unknown)') AS k, COUNT(*) AS c "
-                 f"FROM events WHERE action='blocked' {since_clause} GROUP BY ip ORDER BY c DESC LIMIT %s")
-        params2 = params + [limit]
-        cur.execute(q, tuple(params2))
-        rows = cur.fetchall() or []
-
-    out = [{"key": r[0], "count": int(r[1])} for r in rows]
+    db = get_db()
+    if what == "reasons":
+        q = f"""
+            SELECT COALESCE(reason,'(none)') AS key, COUNT(*) AS c
+            FROM events
+            WHERE action='blocked' {since_clause}
+            GROUP BY reason
+            ORDER BY c DESC
+            LIMIT ?
+        """
+    else:
+        q = f"""
+            SELECT COALESCE(ip,'(unknown)') AS key, COUNT(*) AS c
+            FROM events
+            WHERE action='blocked' {since_clause}
+            GROUP BY ip
+            ORDER BY c DESC
+            LIMIT ?
+        """
+    params.append(limit)
+    rows = db.execute(q, tuple(params)).fetchall()
+    out = [{"key": r["key"], "count": r["c"]} for r in rows]
     return jsonify({"what": what, "items": out})
 
 # ------------------- Core firewall route (WAF) ---------------------
@@ -725,7 +931,7 @@ def firewall_route(path):
     rule_flag, attack_type = rule_based_detect(data)
     ai_label = 0
     try:
-        ai_label = detect_attack(data)  # 0=benign, 1=SQLi, 2=XSS, 3=DDoS, ...
+        ai_label = detect_attack(data)  # 0=benign, 1=SQLi, 2=XSS, 3=DDoS, etc.
     except Exception as e:
         logger.error(f"AI detect_attack error: {e}")
 
@@ -753,7 +959,7 @@ def firewall_route(path):
     log_request_details(client_ip, data, "allowed")
     return jsonify({"status": "allowed", "echo": data})
 
-# ---------------------------- Utilities ------------------------------
+# ---------------------------- Helpers ------------------------------
 def log_request_details(ip: str, data: str, result: str) -> None:
     try:
         with open("firewall.log", "a", encoding="utf-8") as f:
@@ -771,7 +977,15 @@ def get_top_blocked_ips_and_reasons(n: int = 5) -> Tuple[List[str], List[str]]:
         return ips, reasons
     except Exception as e:
         logger.error(f"Failed to get top blocked IPs: {e}")
-        return [], []
+        try:
+            with open("blocked.txt", "r", encoding="utf-8") as f:
+                lines = [ln.strip() for ln in f if ln.strip()]
+            recent = lines[-n:]
+            ips = [r.split(",", 1)[0] for r in recent]
+            reasons = [r.split(",", 1)[1] if "," in r else "Unknown" for r in recent]
+            return ips, reasons
+        except FileNotFoundError:
+            return [], []
 
 def print_statistics() -> None:
     sep = "-" * 48
@@ -811,12 +1025,16 @@ def deployment_helper() -> None:
     print("Stats API (series): /api/statistics/timeseries")
     print("Stats API (top)   : /api/statistics/top")
     print("Traffic usage     : /api/traffic/usage")
-    print("Database          : MySQL (blocked_ips, events, traffic_log, ip_totals, request_log)")
     print("Log File          : firewall.log")
+    print("Blocked IPs DB    : MySQL (with TTL + OS sync)")
+    print("SQLite Stats DB   :", DB_PATH)
     print("===========================================\n")
 
 # ------------------------------- Main ------------------------------
 if __name__ == "__main__":
+    # Initialize stats DB before threads start
+    init_stats_db()
+
     sniff_thread = threading.Thread(target=start_packet_sniffing, daemon=True)
     sniff_thread.start()
 
@@ -839,4 +1057,4 @@ if __name__ == "__main__":
             db_blocker.stop_background_sync()
         except Exception:
             pass
-        os._exit(0)
+        sys.exit(0)
