@@ -39,35 +39,39 @@ def _detect_os():
 
 CURRENT_OS = _detect_os()
 
-
 class MSSQLIPBlocker:
     """
     NOTE: Name kept for compatibility with existing imports.
-    Backend converted to **MySQL** only (DB code changed; nothing else).
+    Backend is **MySQL**.
     """
     def __init__(self, default_ttl_seconds=120, sync_interval_sec=30):
-        """
-        default_ttl_seconds: how long a new block lasts (unless you override per call)
-        sync_interval_sec : how often the background thread reconciles DB ↔ OS firewall
-        """
         self.default_ttl = default_ttl_seconds
         self.sync_interval = sync_interval_sec
         self._stop = threading.Event()
-        self._known_applied = set()  # what we've already applied to OS this run
+        self._known_applied = set()
         self._ensure_schema()
 
     # ---------- DB Helpers ----------
     def _connect(self):
-        return _pool.get_connection()
+        cn = _pool.get_connection()
+        # Force UTC so CURRENT_TIMESTAMP/UTC_TIMESTAMP align with UTC calculations
+        try:
+            cur = cn.cursor()
+            cur.execute("SET time_zone = '+00:00'")
+            cur.close()
+        except Exception:
+            pass
+        return cn
 
     def _ensure_schema(self):
+        # Use TIMESTAMP with CURRENT_TIMESTAMP default (portable).
         create_sql = """
         CREATE TABLE IF NOT EXISTS blocked_ips (
             id          INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             ip          VARCHAR(45) NOT NULL UNIQUE,
             reason      VARCHAR(255) NULL,
-            blocked_at  DATETIME NOT NULL DEFAULT UTC_TIMESTAMP(),
-            expires_at  DATETIME NOT NULL,
+            blocked_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at  TIMESTAMP NOT NULL,
             INDEX idx_expires_at (expires_at),
             INDEX idx_ip (ip)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -81,10 +85,8 @@ class MSSQLIPBlocker:
 
     # ---------- Public API ----------
     def block_ip(self, ip: str, reason: str = "", ttl_seconds: int = None):
-        """Insert or update an IP block with a TTL (from now)."""
         if ttl_seconds is None:
             ttl_seconds = self.default_ttl
-        # Use naive UTC for MySQL DATETIME
         expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds)
 
         upsert_sql = """
@@ -101,11 +103,9 @@ class MSSQLIPBlocker:
         finally:
             cur.close(); cn.close()
 
-        # apply immediately to OS
         self._apply_os_block(ip)
 
     def unblock_ip(self, ip: str):
-        """Remove an IP from DB and OS firewall."""
         cn = self._connect()
         try:
             cur = cn.cursor()
@@ -115,7 +115,6 @@ class MSSQLIPBlocker:
         self._remove_os_block(ip)
 
     def get_active_blocks(self):
-        """Return list of (ip, reason, expires_at) that are not expired."""
         sql = """
         SELECT ip, IFNULL(reason, ''), expires_at
         FROM blocked_ips
@@ -132,7 +131,6 @@ class MSSQLIPBlocker:
             cur.close(); cn.close()
 
     def sweep_expired(self):
-        """Delete expired rows and clean OS firewall for them."""
         sel = "SELECT ip FROM blocked_ips WHERE expires_at <= UTC_TIMESTAMP();"
         delq = "DELETE FROM blocked_ips WHERE expires_at <= UTC_TIMESTAMP();"
         cn = self._connect()
@@ -149,7 +147,6 @@ class MSSQLIPBlocker:
 
     # ---------- Background Sync ----------
     def start_background_sync(self):
-        """Start periodic DB↔OS firewall reconciliation in a thread."""
         t = threading.Thread(target=self._sync_loop, daemon=True)
         t.start()
         return t
@@ -160,24 +157,17 @@ class MSSQLIPBlocker:
     def _sync_loop(self):
         while not self._stop.is_set():
             try:
-                # 1) expire old entries
                 self.sweep_expired()
-
-                # 2) ensure all active entries are applied in OS
                 active = self.get_active_blocks()
                 active_ips = set(ip for ip, _, _ in active)
                 for ip in active_ips:
                     if ip not in self._known_applied:
                         self._apply_os_block(ip)
-
-                # 3) remove OS blocks that are no longer in DB (tracked)
                 to_remove = self._known_applied - active_ips
                 for ip in list(to_remove):
                     self._remove_os_block(ip)
-
             except Exception as e:
                 print("[ip_blocker_db] Sync error:", e)
-
             self._stop.wait(self.sync_interval)
 
     # ---------- OS Firewall ----------
@@ -200,7 +190,6 @@ class MSSQLIPBlocker:
         elif CURRENT_OS == "windows":
             cmd = f'netsh advfirewall firewall delete rule name="DBBlock {ip}"'
         elif CURRENT_OS == "darwin":
-            # pfctl doesn't track single rules by name; best-effort reset
             cmd = "sudo pfctl -F rules -f /etc/pf.conf"
         else:
             print(f"[ip_blocker_db] Unsupported OS for remove: {CURRENT_OS}")
