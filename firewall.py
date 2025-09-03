@@ -2,15 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-Firewall (final)
-----------------
+Firewall (final, hardened)
+--------------------------
 - Network IPS/IDS (Scapy heuristic)
-- App-layer WAF: DDoS limiter, rule + AI checks
+- App-layer WAF: DDoS limiter (thread-safe token bucket), rule + AI checks
 - Live JSON endpoints + settings/dashboard/statistics pages
-- MySQL-backed blocklist with OS sync (via MSSQLIPBlocker)
-- Self-DDoS protections: safe allowances BEFORE limiter, softer throttle, higher limits for admins
-- SQLite-backed request/event history for Statistics page
-- Traffic Tap: logs *every* request (allowed + blocked), per-IP totals, /api/traffic/usage
+- MySQL-backed blocklist with OS sync (via MySQLIPBlocker; MSSQL alias kept for back-compat)
+- Self-DDoS protections: limiter FIRST; smaller limiter for safe endpoints; admin-IP bypass
+- SQLite-backed request/event history + Traffic Tap (/api/traffic/usage)
 
 Env toggles (all optional):
   FW_BLOCK_TTL=300
@@ -19,8 +18,9 @@ Env toggles (all optional):
   FW_DDOS_WINDOW=60
   FW_DDOS_MAX=20                  # baseline limit for unauthenticated
   FW_DDOS_AUTH_MAX=120            # higher per-minute limit for logged-in admins
-  FW_DDOS_HARD_BLOCK_FACTOR=0     # 0=disabled; if >0, hard-block when traffic >= factor*limit
-  FW_TRUST_PROXY=1
+  FW_DDOS_HARD_BLOCK_FACTOR=0     # 0=disabled; if >0, hard block when extreme bursts persist
+  FW_TRUST_PROXY=1                # trust proxy headers (set to 0 if directly exposed)
+  FW_TRUST_CLOUDFLARE=0           # only honor CF-Connecting-IP if traffic actually comes via CF
   FW_BLOCK_CACHE_SECS=10
   FW_LISTEN_HOST=0.0.0.0
   FW_LISTEN_PORT=8080
@@ -28,6 +28,7 @@ Env toggles (all optional):
   SAFE_GET_PATHS=metrics,stats,top_ips,top_blocked
   ADMIN_IPS=                      # comma-separated IPs or CIDRs (e.g., 203.0.113.10,10.0.0.0/8)
   FIREWALL_STATS_DB=firewall_stats.db
+  FW_SECRET_KEY=change-this-in-prod
 """
 
 import os
@@ -53,11 +54,18 @@ try:
 except Exception:
     SCAPY_OK = False
 
-# External modules
+# External modules (project-local)
 import secureauth
 from ai_detector import detect_attack
-from ip_blocker_db import MSSQLIPBlocker
 from os_detection import detect_os
+
+# ---- DB blocker import with MySQL alias/back-compat ----
+try:
+    # Preferred
+    from ip_blocker_db import MySQLIPBlocker as MSSQLIPBlocker  # alias name retained for minimal diff usage
+except ImportError:
+    # Fallback if module still exposes MSSQLIPBlocker old name
+    from ip_blocker_db import MSSQLIPBlocker
 
 # ----------------------------- Config -----------------------------
 FW_BLOCK_TTL              = int(os.getenv("FW_BLOCK_TTL", "300"))
@@ -68,6 +76,7 @@ FW_DDOS_MAX               = int(os.getenv("FW_DDOS_MAX", "20"))
 FW_DDOS_AUTH_MAX          = int(os.getenv("FW_DDOS_AUTH_MAX", "120"))
 FW_DDOS_HARD_BLOCK_FACTOR = int(os.getenv("FW_DDOS_HARD_BLOCK_FACTOR", "0"))  # 0 disables hard block
 FW_TRUST_PROXY            = os.getenv("FW_TRUST_PROXY", "1") == "1"
+FW_TRUST_CLOUDFLARE       = os.getenv("FW_TRUST_CLOUDFLARE", "0") == "1"
 FW_BLOCK_CACHE_SECS       = int(os.getenv("FW_BLOCK_CACHE_SECS", "10"))
 FW_LISTEN_HOST            = os.getenv("FW_LISTEN_HOST", "0.0.0.0")
 FW_LISTEN_PORT            = int(os.getenv("FW_LISTEN_PORT", "8080"))
@@ -136,13 +145,20 @@ if FW_TRUST_PROXY:
     except Exception as e:
         logger.warning(f"ProxyFix not applied: {e}")
 
+# Hardened client IP resolver
 def get_client_ip() -> str:
-    cf_ip = request.headers.get("CF-Connecting-IP")
-    if cf_ip:
-        return cf_ip
+    if not FW_TRUST_PROXY:
+        return request.remote_addr or "unknown"
+
+    if FW_TRUST_CLOUDFLARE:
+        cf_ip = request.headers.get("CF-Connecting-IP")
+        if cf_ip:
+            return cf_ip
+
     xff = request.headers.get("X-Forwarded-For", "")
     if xff:
         return xff.split(",")[0].strip()
+
     return request.remote_addr or "unknown"
 
 # ---------------------- Block cache refresher ----------------------
@@ -194,21 +210,17 @@ def get_db():
 
 # ------------------------------ Traffic Tap ------------------------------
 def _ensure_traffic_tables(conn: sqlite3.Connection) -> None:
-    """
-    Idempotent: creates tables/indexes if they don't exist.
-    Uses the same DB_PATH as the stats/events.
-    """
     cur = conn.cursor()
     cur.execute("PRAGMA journal_mode=WAL;")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS traffic_log (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts         INTEGER NOT NULL,           -- unix seconds
+            ts         INTEGER NOT NULL,
             ip         TEXT,
             method     TEXT,
             path       TEXT,
             status     INTEGER,
-            action     TEXT,                       -- 'allowed'|'blocked'|'throttled' etc.
+            action     TEXT,
             bytes_in   INTEGER DEFAULT 0,
             bytes_out  INTEGER DEFAULT 0,
             user_agent TEXT
@@ -230,9 +242,6 @@ def _ensure_traffic_tables(conn: sqlite3.Connection) -> None:
 
 def record_traffic(ip: str, method: str, path: str, status: int, action: str,
                    bytes_in: int, bytes_out: int, user_agent: str = "") -> None:
-    """
-    Logs every request and updates per-IP totals.
-    """
     ts = int(time.time())
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -261,11 +270,6 @@ def record_traffic(ip: str, method: str, path: str, status: int, action: str,
         logger.debug(f"record_traffic failed: {e}")
 
 def get_traffic_usage(hours: int | None = None, top: int = 10) -> dict:
-    """
-    Returns global totals + top talkers.
-    If `hours` is provided, totals are computed from traffic_log window.
-    Otherwise uses the fast ip_totals table.
-    """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     _ensure_traffic_tables(conn)
@@ -380,7 +384,6 @@ def log_event(action: str, ip: str, reason: str = None,
             conn = get_db()
             _insert_event(conn, ts, action, ip, reason, bytes_in, bytes_out, user_agent)
         except RuntimeError:
-            # outside request context
             conn = sqlite3.connect(DB_PATH)
             _insert_event(conn, ts, action, ip, reason, bytes_in, bytes_out, user_agent)
             conn.close()
@@ -397,28 +400,45 @@ def log_event_bg(action: str, ip: str, reason: str = None,
     except Exception as e:
         logger.debug(f"log_event_bg failed: {e}")
 
-# --------------------------- DDoS limiter --------------------------
-class DDoSRateLimiter:
-    def __init__(self, time_window: int = 60, max_requests: int = 20):
-        self.time_window = time_window
-        self.max_requests = max_requests
-        self.requests_log: Dict[str, Deque[float]] = defaultdict(deque)
+# --------------------------- DDoS limiter (token bucket) --------------------------
+import threading as _threading
 
-    def is_ddos(self, ip: str, max_requests: int = None) -> Tuple[bool, int]:
-        """Returns (is_ddos, current_count)."""
-        threshold = max_requests if max_requests is not None else self.max_requests
-        now = time.time()
-        dq = self.requests_log[ip]
-        limit = now - self.time_window
-        while dq and dq[0] < limit:
-            dq.popleft()
-        count = len(dq)
-        if count >= threshold:
-            return True, count
-        dq.append(now)
-        return False, count + 1
+class TokenBucketLimiter:
+    """
+    Thread-safe per-IP (and optional per-path) token bucket.
+    - capacity tokens per window seconds (~max burst)
+    - refill at capacity/window tokens per second (~sustained RPS)
+    """
+    def __init__(self, capacity: int, window_sec: int, per_path: bool = True):
+        self.capacity = max(1, capacity)
+        self.window = max(1, window_sec)
+        self.rate = self.capacity / self.window
+        self.per_path = per_path
+        self._state = defaultdict(lambda: {"tokens": self.capacity, "ts": time.monotonic()})
+        self._locks = defaultdict(_threading.Lock)
 
-ddos_limiter = DDoSRateLimiter(time_window=FW_DDOS_WINDOW, max_requests=FW_DDOS_MAX)
+    def _key(self, ip: str, path: str) -> str:
+        return f"{ip}|{path}" if self.per_path else ip
+
+    def allow(self, ip: str, path: str = "/") -> tuple[bool, int]:
+        k = self._key(ip, path)
+        lock = self._locks[k]
+        with lock:
+            now = time.monotonic()
+            s = self._state[k]
+            elapsed = max(0.0, now - s["ts"])
+            s["ts"] = now
+            # refill
+            s["tokens"] = min(self.capacity, s["tokens"] + elapsed * self.rate)
+            if s["tokens"] >= 1.0:
+                s["tokens"] -= 1.0
+                return True, int(s["tokens"])
+            # negative remaining encodes how far below zero we are (useful for "extreme burst" heuristics)
+            return False, int(s["tokens"])  # will be <= 0
+
+# Two limiters: general + stricter for safe endpoints
+ddos_limiter = TokenBucketLimiter(capacity=FW_DDOS_MAX, window_sec=FW_DDOS_WINDOW, per_path=True)
+safe_limiter = TokenBucketLimiter(capacity=max(5, FW_DDOS_MAX // 4), window_sec=FW_DDOS_WINDOW, per_path=True)
 
 # ------------------------------ Stats (in-memory quick) ------------------------------
 class FirewallStats:
@@ -663,7 +683,6 @@ def api_del_admin(username):
         logging.error(f"delete_admin failed: {e}")
         return jsonify({"error": "delete_admin failed"}), 500
 
-# NEW: Reset admin password
 @app.route("/api/admins/<username>/password", methods=["PUT"])
 def api_admin_reset_password(username):
     if "user" not in session:
@@ -674,7 +693,6 @@ def api_admin_reset_password(username):
         return jsonify({"error": "password too short"}), 400
 
     try:
-        # Prefer explicit setters if available
         if hasattr(secureauth, "set_password"):
             ok = secureauth.set_password(username, password)
             if not ok:
@@ -688,7 +706,6 @@ def api_admin_reset_password(username):
             if not ok:
                 return jsonify({"error": "update_admin_password failed"}), 500
         else:
-            # Fallback: recreate user
             try:
                 secureauth.delete_admin(username)
             except Exception:
@@ -703,7 +720,7 @@ def api_admin_reset_password(username):
         logging.error(f"reset password failed for {username}: {e}")
         return jsonify({"error": "reset failed"}), 500
 
-# ---------- Quick stats JSON (existing) ----------
+# ---------- Quick stats JSON ----------
 @app.route("/stats")
 def stats_endpoint():
     return jsonify(stats.to_dict())
@@ -890,35 +907,20 @@ def firewall_route(path):
     data = request.get_data(as_text=True) or ""
     bytes_in = request.content_length or len(data.encode("utf-8"))
 
-    # Admin IP allow-list (skip limiter entirely)
+    # 1) admin IPs: always allow
     if any(_ip_in_cidr(client_ip, cidr) for cidr in ADMIN_IPS):
         stats.allowed_requests += 1
         log_event('allowed', client_ip, reason='admin_ip', bytes_in=bytes_in, user_agent=ua)
         log_request_details(client_ip, data, "allowed (admin IP)")
         return jsonify({"status": "allowed", "echo": data})
 
-    # SAFE ALLOWANCES FIRST
-    if "user" in session:
-        stats.allowed_requests += 1
-        log_event('allowed', client_ip, reason='authenticated', bytes_in=bytes_in, user_agent=ua)
-        log_request_details(client_ip, data, "allowed (authenticated)")
-        return jsonify({"status": "allowed", "echo": data})
-
-    referer = request.headers.get("Referer", "")
-    is_refresh = bool(referer and ('/dashboard' in referer or (path and path in referer)))
-    if request.method == "GET" and (path in SAFE_GET_PATHS or not data.strip() or is_refresh):
-        stats.allowed_requests += 1
-        log_event('allowed', client_ip, reason='safe_get', bytes_in=bytes_in, user_agent=ua)
-        log_request_details(client_ip, data, "allowed (safe GET/refresh)")
-        return jsonify({"status": "allowed", "echo": data})
-
-    # DDoS limiter
-    limit = FW_DDOS_AUTH_MAX if ("user" in session) else FW_DDOS_MAX
-    throttled, count = ddos_limiter.is_ddos(client_ip, max_requests=limit)
-    if throttled:
+    # 2) global limiter FIRST (strict)
+    ok, remaining = ddos_limiter.allow(client_ip, request.path)
+    if not ok:
         stats.blocked_requests += 1
         stats.ddos_blocks += 1
-        if FW_DDOS_HARD_BLOCK_FACTOR > 0 and count >= FW_DDOS_HARD_BLOCK_FACTOR * limit:
+        # optional hard block if over extreme factor (interpret remaining <= -factor as sustained drain)
+        if FW_DDOS_HARD_BLOCK_FACTOR > 0 and remaining <= -(FW_DDOS_HARD_BLOCK_FACTOR):
             _apply_block(client_ip, "DDoS (extreme burst)", FW_DDOS_BLOCK_TTL)
             log_event('blocked', client_ip, reason='ddos_hard', bytes_in=bytes_in, user_agent=ua)
             log_request_details(client_ip, "<rate-limited>", "hard-blocked (extreme burst)")
@@ -927,7 +929,30 @@ def firewall_route(path):
         log_request_details(client_ip, "<rate-limited>", "throttled (soft)")
         return jsonify({"status": "throttled", "reason": "rate limit"}), 429
 
-    # Rule-based & AI checks
+    # 3) authenticated users: allow (after one token was consumed)
+    if "user" in session:
+        stats.allowed_requests += 1
+        log_event('allowed', client_ip, reason='authenticated', bytes_in=bytes_in, user_agent=ua)
+        log_request_details(client_ip, data, "allowed (authenticated)")
+        return jsonify({"status": "allowed", "echo": data})
+
+    # 4) safe GETs: allow but under a *smaller* limiter (prevents dashboard/metrics floods)
+    if request.method == "GET":
+        p = request.path.lstrip("/")
+        if (p in SAFE_GET_PATHS) or (not data.strip()):
+            ok2, _ = safe_limiter.allow(client_ip, request.path)
+            if not ok2:
+                stats.blocked_requests += 1
+                stats.ddos_blocks += 1
+                log_event('blocked', client_ip, reason='safe_path_rate_limit', bytes_in=bytes_in, user_agent=ua)
+                log_request_details(client_ip, "<rate-limited>", "throttled (safe path)")
+                return jsonify({"status": "throttled", "reason": "rate limit (safe path)"}), 429
+            stats.allowed_requests += 1
+            log_event('allowed', client_ip, reason='safe_get', bytes_in=bytes_in, user_agent=ua)
+            log_request_details(client_ip, data, "allowed (safe GET)")
+            return jsonify({"status": "allowed", "echo": data})
+
+    # Rule-based & AI checks (after limiter)
     rule_flag, attack_type = rule_based_detect(data)
     ai_label = 0
     try:
@@ -964,7 +989,9 @@ def log_request_details(ip: str, data: str, result: str) -> None:
     try:
         with open("firewall.log", "a", encoding="utf-8") as f:
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"{ts} | {ip} | {result} | {data}\n")
+            # avoid logging giant payloads
+            snippet = data if len(data) <= 2048 else (data[:2048] + "...<truncated>")
+            f.write(f"{ts} | {ip} | {result} | {snippet}\n")
     except Exception as exc:
         logger.debug(f"Log write error: {exc}")
 
@@ -1007,7 +1034,8 @@ def dynamic_update() -> None:
 
 def run_server() -> None:
     logger.info(f"Starting Flask server on {FW_LISTEN_HOST}:{FW_LISTEN_PORT}")
-    app.run(host=FW_LISTEN_HOST, port=FW_LISTEN_PORT, debug=True, use_reloader=False)
+    # debug False in production; reloader disabled due to threads
+    app.run(host=FW_LISTEN_HOST, port=FW_LISTEN_PORT, debug=False, use_reloader=False, threaded=True)
 
 def deployment_helper() -> None:
     print("\n=== Deployment Summary ===")
